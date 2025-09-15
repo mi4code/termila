@@ -1,5 +1,5 @@
 # termila
-*terminal app wrtten in Rust based on HUI*
+*terminal app written in Rust based on HUI*
 
 to build and run: `cargo run --release`
 
