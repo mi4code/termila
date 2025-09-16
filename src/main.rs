@@ -195,7 +195,7 @@ impl UI {
 				
 				if (document.activeElement.tagName != 'BODY'){return;} // allow interaction with other inputs too
 				
-                key_term_handle(event.keyCode);
+                key_term_handle(event.keyCode); // TODO: support non-utf8 input, fix windows arrows
 
             });
 
@@ -221,7 +221,7 @@ impl UI {
         webview.call_js(&format!(r#"
             window.addEventListener('resize', () => {{
 
-            console.log("jsresize");
+				console.log("jsresize");
 
                 const span = document.createElement('span');
                 span.textContent = 'M';
@@ -286,7 +286,7 @@ impl UI {
         // create html
         let mut html = String::new();
         for i in formated_text {
-            html.push_str( &format!("<span style=\"{}\">{}</span>", i.style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" "), i.text.replace(" ", "&nbsp;").replace("\n","<br>").replace("\\","\\\\")) );
+            html.push_str( &format!("<span style=\"{}\">{}</span>", i.style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" "), i.text.replace(" ", "&nbsp;").replace("\\","\\\\").replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")) );
         }
 
         // update whole terminal content
@@ -392,19 +392,13 @@ struct BUFF_formated_text<'l> {
     updated: bool,
 }
 
-struct BUFF_cursor_position { // TODO: move members to BUFF
-    index: usize,
-    character: usize,  // TODO: we currently use byte indexes (may be unsafe; used by len, insert, find; alternative is nth char) - ensure that terminal specs do too (for utf16/32 support)
-    insert: bool,
-}
-
 struct BUFF<'a> {
     formated_text: Vec<BUFF_formated_text<'a>>, // html_vec [ [<html>,<css or classn>,<q updated>], ] // TODO: ensure that blanks are not preserved
     current_escape: String, // multi-character special commands; contains the sequence from the escape byte to the last character read; if we are not currently reading any sequence (after previous was finished) it is empty string
     current_escape_max_length: usize, // this is to avoid breaking terminal with unsupported/malicious sequences; the value depends on different sequence type
-    cursor_position: BUFF_cursor_position,
+    cursor_position_index: usize,
+    cursor_position_character: usize,
     handle_cr_next_time: bool,
-    handle_unicode: u8,
 }
 
 impl BUFF<'_> {
@@ -415,9 +409,9 @@ impl BUFF<'_> {
                 formated_text: vec![BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:false}, /*BUFF_formated_text{text:"_".to_string(),style:"font-style: bold;".to_string(),updated:false}*/],
                 current_escape: "".to_string(),
                 current_escape_max_length: 0,
-                cursor_position: BUFF_cursor_position{index: 0, character: 1, insert: false},
+                cursor_position_index: 0,
+                cursor_position_character: 1,
                 handle_cr_next_time: false,
-                handle_unicode: 0,
             })
         }
     }
@@ -427,20 +421,20 @@ impl BUFF<'_> {
 	fn write_buff(&mut self, chr: char) { // write
 
 		// fix invalid cursor position
-        if self.cursor_position.index > self.formated_text.len(){
+        if self.cursor_position_index > self.formated_text.len(){
             eprintln!("INVALID POSITION IN BUFFER - RESETING");
-            self.cursor_position.index = self.formated_text.len();
-            self.cursor_position.character = 0;
+            self.cursor_position_index = self.formated_text.len();
+            self.cursor_position_character = 0;
             self.formated_text.push( BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true} );
         }
-        if self.cursor_position.character > self.formated_text.get(self.cursor_position.index).unwrap().text.len() {
+        if self.cursor_position_character > self.formated_text.get(self.cursor_position_index).unwrap().text.len() {
             eprintln!("INVALID POSITION IN BUFFER - RESETING");
-            self.cursor_position.character = self.formated_text.get(self.cursor_position.index).unwrap().text.len();
+            self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.len();
         }
 		
         // remove character at cursor position if overwriting and if its not newline
-        let mut index = self.cursor_position.index;
-        let mut character = self.cursor_position.character;
+        let mut index = self.cursor_position_index;
+        let mut character = self.cursor_position_character;
 		if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") == "\0" { // move to at character position if we are not already
 			self.iter_next(& mut index,& mut character);
 		}
@@ -450,7 +444,7 @@ impl BUFF<'_> {
             let mut start = character/*+1*/;
             let mut end = character+1/*+1*/;
 
-            while ! self.formated_text.get(index).unwrap().text.is_char_boundary(start) {
+            while ! self.formated_text.get(index).unwrap().text.is_char_boundary(start) && start > 0 {
                 start-=1;
             }
             while ! self.formated_text.get(index).unwrap().text.is_char_boundary(end) && end <= self.formated_text.get(index).unwrap().text.len() {
@@ -464,12 +458,12 @@ impl BUFF<'_> {
 		
 
         // place character
-        let mut pos = self.cursor_position.character;
-        while ! self.formated_text.get(self.cursor_position.index).unwrap().text.is_char_boundary(pos) {
+        let mut pos = self.cursor_position_character;
+        while ! self.formated_text.get(self.cursor_position_index).unwrap().text.is_char_boundary(pos) && pos > 0 {
             pos-=1;
         }
-        self.formated_text.get_mut(self.cursor_position.index).unwrap().text.insert(pos, chr);
-        self.cursor_position.character+=1;
+        self.formated_text.get_mut(self.cursor_position_index).unwrap().text.insert(pos, chr);
+        self.cursor_position_character += chr.len_utf8();
 		
     }
 
@@ -478,13 +472,13 @@ impl BUFF<'_> {
     fn write_raw(&mut self, mut chr: char) {
 
 		if chr == '\x00' {return;} // never accept '\0' for processing - pty implementation returns it when there are no new bytes (it isnt shown anyway and even escape sequences wont contain it)
-        if !chr.is_ascii() {chr='#';} // TODO: accept char (utf8/16/32) or construct it
+        //if !chr.is_ascii() {chr='#';} // TODO: accept char (utf8/16/32) or construct it
 
 
         if self.current_escape.len() == 0 { // regular text
 
 			// TODO: handle line endings with set_cursor (currently works fine on windows, but not on linux)
-            if /*self.formated_text.get(self.cursor_position.index).unwrap().text.chars().nth(self.cursor_position.character-1).unwrap_or(' ') == '\r' ||*/ self.handle_cr_next_time { // carriage return
+            if /*self.formated_text.get(self.cursor_position_index).unwrap().text.chars().nth(self.cursor_position_character-1).unwrap_or(' ') == '\r' ||*/ self.handle_cr_next_time { // carriage return
 
                 self.handle_cr_next_time = false;
 
@@ -492,31 +486,29 @@ impl BUFF<'_> {
                     // do nothing, the character is useless
                 }
 
-                // else if true { self.set_cursor_cr_safe(1,self.get_cursor_r_safe()); }
+                // else if true { self.set_cursor_cr(1,self.get_cursor_r()); }
 
                 else { // move the cursor
 
-                    if self.formated_text.get(self.cursor_position.index).unwrap().text.contains('\n') { // newline in current text style chunk
+                    if self.formated_text.get(self.cursor_position_index).unwrap().text.contains('\n') { // newline in current text style chunk
 
-                        self.cursor_position.character = self.formated_text.get(self.cursor_position.index).unwrap().text.rfind('\n').unwrap()+1;
+                        self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.rfind('\n').unwrap()+1;
 
                     }
 
                     else { // newline not in current text style chunk
 
-                        self.cursor_position.character = 0; // default position when there is no \n
+                        self.cursor_position_character = 0; // default position when there is no \n
 
-                        while self.cursor_position.index > 0 {
-                            self.cursor_position.index = self.cursor_position.index - 1;
-                            if self.formated_text.get(self.cursor_position.index).unwrap().text.contains('\n') {
-                                self.cursor_position.character = self.formated_text.get(self.cursor_position.index).unwrap().text.rfind('\n').unwrap()+1;
+                        while self.cursor_position_index > 0 {
+                            self.cursor_position_index = self.cursor_position_index - 1;
+                            if self.formated_text.get(self.cursor_position_index).unwrap().text.contains('\n') {
+                                self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.rfind('\n').unwrap()+1;
                                 break;
                             }
                         }
 
                     }
-
-                    self.cursor_position.insert = false;
 
                 }
             }
@@ -532,17 +524,17 @@ impl BUFF<'_> {
 			
 				// the cursour should move one character to the left, but its not supposed to delete it
 			
-				let mut c = self.get_cursor_c_safe();
+				let mut c = self.get_cursor_c();
 				if c > 1 { c-=1; }
-				self.set_cursor_cr_safe(c,self.get_cursor_r_safe());
+				self.set_cursor_cr(c,self.get_cursor_r());
 
-                /*if self.cursor_position.character > 0 { // delete previous character
-                    self.formated_text.get_mut(self.cursor_position.index).unwrap().text.replace_range(self.cursor_position.character-1..self.cursor_position.character, "");
-                    self.cursor_position.character -= 1;
-                    self.formated_text.get_mut(self.cursor_position.index).unwrap().updated = true;
+                /*if self.cursor_position_character > 0 { // delete previous character
+                    self.formated_text.get_mut(self.cursor_position_index).unwrap().text.replace_range(self.cursor_position_character-1..self.cursor_position_character, "");
+                    self.cursor_position_character -= 1;
+                    self.formated_text.get_mut(self.cursor_position_index).unwrap().updated = true;
                 }
-                else if self.cursor_position.index > 0 { // find and then delete previous character
-                    if let Some(ff) = self.formated_text.iter_mut().skip(self.cursor_position.index).rev().find(|f| f.text.len()>=1) {
+                else if self.cursor_position_index > 0 { // find and then delete previous character
+                    if let Some(ff) = self.formated_text.iter_mut().skip(self.cursor_position_index).rev().find(|f| f.text.len()>=1) {
                         ff.text.pop();
                         ff.updated = true;
                     }
@@ -556,22 +548,22 @@ impl BUFF<'_> {
 			
 				// TODO: handle line endings with set_cursor (currently works fine on windows, but not on linux)
 			
-				/* let mut r = self.get_cursor_r_safe();
+				/* let mut r = self.get_cursor_r();
 				if r == 0 {
-					self.set_cursor_cr_safe(99999,0);
+					self.set_cursor_cr(99999,0);
 					r+=1;
 					self.write_buff('\n');
 				}
-				self.set_cursor_cr_safe(1,r-1); */
+				self.set_cursor_cr(1,r-1); */
 			
-                if self.get_cursor_r_safe() > 1 {self.set_cursor_cr_safe(1/*self.get_cursor_c_safe()*/,self.get_cursor_r_safe()-1);}
+                if self.get_cursor_r() > 1 {self.set_cursor_cr(1/*self.get_cursor_c()*/,self.get_cursor_r()-1);}
                 else {self.write_buff('\n');}
 				
             }
             else if chr == '\r' { // carriage return
 			
 				// TODO: handle line endings with set_cursor (currently works fine on windows, but not on linux)
-				// self.set_cursor_cr_safe(1,self.get_cursor_r_safe());
+				// self.set_cursor_cr(1,self.get_cursor_r());
 				self.handle_cr_next_time = true;
 
             }
@@ -819,16 +811,16 @@ impl BUFF<'_> {
 						let css = escape_to_css(self.current_escape.clone());
 
 						// if there is empty style field at current cursor position, update its css 
-						if self.cursor_position.index < self.formated_text.len() && self.formated_text.get(self.cursor_position.index).unwrap().text.len() == 0 {
-							self.formated_text.get_mut(self.cursor_position.index).unwrap().style.extend(css);
-							self.formated_text.get_mut(self.cursor_position.index).unwrap().updated = true;
+						if self.cursor_position_index < self.formated_text.len() && self.formated_text.get(self.cursor_position_index).unwrap().text.len() == 0 {
+							self.formated_text.get_mut(self.cursor_position_index).unwrap().style.extend(css);
+							self.formated_text.get_mut(self.cursor_position_index).unwrap().updated = true;
 						}
 						// create new style field and switch to it
 						else {
-							self.formated_text.insert(self.cursor_position.index+1, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position.index).unwrap().style.clone(),updated:true});
-							self.cursor_position.index += 1;
-							self.cursor_position.character = 0;
-							self.formated_text.get_mut(self.cursor_position.index).unwrap().style.extend(css);
+							self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index).unwrap().style.clone(),updated:true});
+							self.cursor_position_index += 1;
+							self.cursor_position_character = 0;
+							self.formated_text.get_mut(self.cursor_position_index).unwrap().style.extend(css);
 						}
 
 					}
@@ -857,20 +849,21 @@ impl BUFF<'_> {
 						
 						// TODO: this would definitely break partial updates
 						self.formated_text = vec![BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true},];
-						self.cursor_position = BUFF_cursor_position{index: 0, character: 0, insert: false};
+						self.cursor_position_index = 0;
+						self.cursor_position_character = 1;
 
 					}
 					
 					else if final_escape.ends_with("K") { // clear line
 						
 						// get cursor position
-						let c = self.get_cursor_c_safe();
-						let r = self.get_cursor_r_safe();
+						let c = self.get_cursor_c();
+						let r = self.get_cursor_r();
 						
 						if final_escape == "2K" { // entire line
 							
 							// go to beginning of the line
-							self.set_cursor_cr_safe(1,r);
+							self.set_cursor_cr(1,r);
 							
 							// write spaces
 							for _ in 0..unsafe{CURRENT_PTY.as_ref().unwrap()}.columns { self.write_buff(' '); }
@@ -879,7 +872,7 @@ impl BUFF<'_> {
 						else if final_escape == "1K" { // from beginning to cursor
 							
 							// go to beginning of the line
-							self.set_cursor_cr_safe(1,r);
+							self.set_cursor_cr(1,r);
 							
 							// write spaces
 							for _ in 0..c-1 { self.write_buff(' '); }
@@ -888,12 +881,12 @@ impl BUFF<'_> {
 						else if final_escape == "0K" || final_escape == "K" { // from cursor to end of line
 							
 							// write spaces
-							for _ in 0..unsafe{CURRENT_PTY.as_ref().unwrap()}.columns+1-c { self.write_buff(' '); }
+							for _ in 0..(unsafe{CURRENT_PTY.as_ref().unwrap()}.columns+1).saturating_sub(c) { self.write_buff(' '); }
 							
 						}
 						
 						// restore cursor position
-						self.set_cursor_cr_safe(c,r);
+						self.set_cursor_cr(c,r);
 
 						// end sequence
 						self.current_escape = "".to_string();
@@ -902,14 +895,14 @@ impl BUFF<'_> {
 					else if final_escape.ends_with("X") { // erase in line without moving cursor
 					
 						// get cursor position
-						let c = self.get_cursor_c_safe();
-						let r = self.get_cursor_r_safe();
+						let c = self.get_cursor_c();
+						let r = self.get_cursor_r();
 						
 						// write spaces
 						for _ in 0..final_escape[0..final_escape.len()-1].parse::<u8>().unwrap_or(1) { self.write_buff(' '); }
 						
 						// restore cursor position
-						self.set_cursor_cr_safe(c,r);
+						self.set_cursor_cr(c,r);
 
 						// end sequence
 						self.current_escape = "".to_string();
@@ -922,40 +915,40 @@ impl BUFF<'_> {
 						if self.current_escape.contains(";") {
 							let r = self.current_escape[2..self.current_escape.find(';').unwrap()].parse::<usize>().unwrap_or(1);
 							let c = self.current_escape[self.current_escape.find(';').unwrap()+1..self.current_escape.len()-1].parse::<usize>().unwrap_or(1);
-							self.set_cursor_cr_safe(c,unsafe{CURRENT_PTY.as_ref().unwrap()}.rows.saturating_sub(r)+1);
+							self.set_cursor_cr(c,unsafe{CURRENT_PTY.as_ref().unwrap()}.rows.saturating_sub(r)+1);
 						}
 						
 						// column ommited so default
 						else {
 							let r = self.current_escape[2..self.current_escape.find('H').unwrap()].parse::<usize>().unwrap_or(1);
 							let c = 1;
-							self.set_cursor_cr_safe(c,unsafe{CURRENT_PTY.as_ref().unwrap()}.rows.saturating_sub(r)+1);
+							self.set_cursor_cr(c,unsafe{CURRENT_PTY.as_ref().unwrap()}.rows.saturating_sub(r)+1);
 						}
 						
 					}
 					
 					else if final_escape.ends_with("A") { // cursor up
 						let n = self.current_escape[2..self.current_escape.len()-1].parse::<usize>().unwrap_or(1);
-						self.set_cursor_cr_safe(self.get_cursor_c_safe(),self.get_cursor_r_safe()+n);
+						self.set_cursor_cr(self.get_cursor_c(),self.get_cursor_r()+n);
 					}
 					
 					else if final_escape.ends_with("B") { // cursor down
 						let n = self.current_escape[2..self.current_escape.len()-1].parse::<usize>().unwrap_or(1);
-						let r = self.get_cursor_r_safe();
-						if n <= r { self.set_cursor_cr_safe(self.get_cursor_c_safe(),r-n); }
-						else { self.set_cursor_cr_safe(self.get_cursor_c_safe(),0); }
+						let r = self.get_cursor_r();
+						if n <= r { self.set_cursor_cr(self.get_cursor_c(),r-n); }
+						else { self.set_cursor_cr(self.get_cursor_c(),0); }
 					}
 					
 					else if final_escape.ends_with("C") { // cursor right
 						let n = self.current_escape[2..self.current_escape.len()-1].parse::<usize>().unwrap_or(1);
-						self.set_cursor_cr_safe(self.get_cursor_c_safe()+n,self.get_cursor_r_safe());
+						self.set_cursor_cr(self.get_cursor_c()+n,self.get_cursor_r());
 					}
 					
 					else if final_escape.ends_with("D") { // cursor left
 						let n = self.current_escape[2..self.current_escape.len()-1].parse::<usize>().unwrap_or(1);
-						let c = self.get_cursor_c_safe();
-						if n < c { self.set_cursor_cr_safe(c-n,self.get_cursor_r_safe()); }
-						else { self.set_cursor_cr_safe(1,self.get_cursor_r_safe()); }
+						let c = self.get_cursor_c();
+						if n < c { self.set_cursor_cr(c-n,self.get_cursor_r()); }
+						else { self.set_cursor_cr(1,self.get_cursor_r()); }
 					}
 					
 					// else if ... // TODO: some more
@@ -1000,11 +993,17 @@ impl BUFF<'_> {
 	fn iter_next (&self, index: &mut usize, character: &mut usize) -> bool {
 		let this = &self.formated_text;
 		
-		if *character+1 < this.get(*index).unwrap().text.len() { // same style chunk
+		// same style chunk
+		*character += 1;
+		while ! this.get(*index).unwrap().text.is_char_boundary(*character) && *character < this.get(*index).unwrap().text.len() {
 			*character += 1;
+		}
+		if *character < this.get(*index).unwrap().text.len() {
 			return true;
 		}
-		else { // next style chunk (with at least one char)
+		
+		// next style chunk (with at least one char)
+		else { 
 			while true {
 				if ! (*index+1 < this.len()) {
 					return false;
@@ -1015,15 +1014,14 @@ impl BUFF<'_> {
 			*character = 0;
 			return true;
 		}
+		
 	}
 	
 	fn iter_prev (&self, index: &mut usize, character: &mut usize) -> bool {
 		let this = &self.formated_text;
-		if *character > 0 { // same style chunk
-			*character -= 1;
-			return true;
-		}
-		else { // prev style chunk (with at least one char)
+		
+		// prev style chunk (with at least one char)
+		if *character == 0 { 
 			while true {
 				if ! (*index > 0) {
 					return false;
@@ -1032,11 +1030,24 @@ impl BUFF<'_> {
 				if this.get(*index).unwrap().text.len() > 0 {break;}
 			}
 			*character = this.get(*index).unwrap().text.len()-1;
+			while ! this.get(*index).unwrap().text.is_char_boundary(*character) && *character > 0 {
+				*character -= 1;
+			}
 			return true;
 		}
+		
+		// same style chunk
+		else {
+			*character -= 1;
+			while ! this.get(*index).unwrap().text.is_char_boundary(*character) && *character > 0 {
+				*character -= 1;
+			}
+			return true;
+		}
+		
 	}
 	
-	fn iter_valid (&self, index: &mut usize, character: &mut usize) { // TODO: use it or remove it
+	/*fn iter_valid (&self, index: &mut usize, character: &mut usize) { // TODO: use it or remove it - we expect all positions to be valid
 		let this = &self.formated_text;
 		if *index >= this.len(){
 			eprintln!("INVALID POSITION IN BUFFER - RESETING");
@@ -1053,54 +1064,56 @@ impl BUFF<'_> {
 				//return false;
 			}
 		}
-	}
+	}*/
 
 
-    fn set_cursor_safe(&mut self, mut index: usize, mut character: usize) {
+    fn set_cursor(&mut self, mut index: usize, mut character: usize) {
+		// this function expects index to be < .len() and that character to be .is_char_boundary() && < .len()
+		// is and should be used only by set_cursor_cr
 
         // insert first part to index+1
         self.formated_text.insert(index+1, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(..character).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true});
         // insert new patr to index+2
-        self.formated_text.insert(index+2, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position.index).unwrap().style.clone(),updated:true});
+        self.formated_text.insert(index+2, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index).unwrap().style.clone(),updated:true});
         // insert second part to index+3
             self.formated_text.insert(index+3, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(character..).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true});
         // remove part at index
         self.formated_text.remove(index);
 
-        self.cursor_position.index = index+1;
-        self.cursor_position.character = 0;
+        self.cursor_position_index = index+1;
+        self.cursor_position_character = 0;
 
     }
 
-    fn get_cursor_c_safe(&self) -> usize { // from left to right (first character is 1)
+    fn get_cursor_c(&self) -> usize {
 
         let mut column = 0;
 
         let mut prev = true;
-        let mut index = self.cursor_position.index;
-        let mut character = self.cursor_position.character;
+        let mut index = self.cursor_position_index;
+        let mut character = self.cursor_position_character;
         // iter_valid(& self.formated_text,& mut index,& mut character);
         while prev {
 
             column += 1;
 
-            if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") == "\n" {break;}
-
             prev = self.iter_prev(& mut index,& mut character);
+			
+			if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") == "\n" {break;}
 
         }
 
-        return column-1;
+        return column;
 
     }
 
-    fn get_cursor_r_safe(&self) -> usize { // from bottom of console (last line is 0)
+    fn get_cursor_r(&self) -> usize {
 
         let mut row = 0;
 
         let mut next = true;
-        let mut index = self.cursor_position.index;
-        let mut character = self.cursor_position.character;
+        let mut index = self.cursor_position_index;
+        let mut character = self.cursor_position_character;
         // iter_valid(& self.formated_text,& mut index,& mut character);
         while next {
 
@@ -1112,43 +1125,46 @@ impl BUFF<'_> {
 
         }
 
-        //if row > 0 {row-=1;} // when thiis is not the last row there is newline after it
-
         return row;
 
     }
 
-    fn set_cursor_cr_safe(&mut self, mut column: usize, mut row: usize) {
-        let old_col = self.get_cursor_c_safe();
-        let old_row = self.get_cursor_r_safe();
+    fn set_cursor_cr(&mut self, mut column: usize, mut row: usize) {
+		
+		// store debug statistics
+        let old_col = self.get_cursor_c();
+        let old_row = self.get_cursor_r();
         let des_col = column;
         let des_row = row;
 
+
+		// limit values to terminal size
+		if column == 0 {column=1;}
         if column >= unsafe{CURRENT_PTY.as_ref().unwrap()}.columns {column=unsafe{CURRENT_PTY.as_ref().unwrap()}.columns;}
         if row >= unsafe{CURRENT_PTY.as_ref().unwrap()}.rows {row=unsafe{CURRENT_PTY.as_ref().unwrap()}.rows;}
-        row+=1; // keep this here for now to prevent usize underflow (row value is now from 1 to size+1)  // TODO: this shouldnt be there
-
-
-		// TODO: this is just workaround - allows for more tuis to display correctly - but sometimes moves stuff completely elsewhere (consider adding newlines at i0c0 or having them there from start and hide them by the dom generator) 
-		// add rows in case there are less of them than the requested move
-		let mut existing_rows0 = 1;
-		let mut index0 = 0;
-		let mut character0 = 0;
-		let mut next0 = true;
-        while next0 {
-			if self.formated_text.get(index0).unwrap().text.get(character0..character0+1).unwrap_or("\0") == "\n" {existing_rows0+=1;}
-            next0 = self.iter_next(& mut index0,& mut character0);
-			if existing_rows0 > unsafe{CURRENT_PTY.as_ref().unwrap()}.rows {break;}
-        }
-		// add newlines if needed
-		if existing_rows0 < row {
-			self.set_cursor_safe( self.formated_text.len()-1, self.formated_text.get(self.formated_text.len()-1).unwrap().text.len() ); // since we are in set_cursor we can move the cursor freely
-			for _ in 0..(unsafe{CURRENT_PTY.as_ref().unwrap()}.rows-existing_rows0) { self.write_buff('\n'); }
-		}
 		
 
-        let mut index = self.formated_text.len()-1;
-        let mut character = self.formated_text.get(index).unwrap().text.len();
+		// add rows in case there are less of them than the requested move
+		// TODO: this is just workaround - allows for more tuis to display correctly but sometimes moves stuff completely elsewhere (consider adding newlines at i0c0 or having them there from start and hide them by the dom generator or scrollback control) 
+		let mut index = 0;
+		let mut character = 0;
+		let mut existing_rows = 1;
+		let mut iter = true;
+        while iter {
+			if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") == "\n" {existing_rows+=1;}
+            iter = self.iter_next(& mut index,& mut character);
+			if existing_rows > unsafe{CURRENT_PTY.as_ref().unwrap()}.rows {break;}
+        }
+		// add newlines if needed
+		if existing_rows < row+1 {
+			self.set_cursor( self.formated_text.len()-1, self.formated_text.get(self.formated_text.len()-1).unwrap().text.len() ); // since we are in set_cursor we can move the cursor freely
+			for _ in 0..(unsafe{CURRENT_PTY.as_ref().unwrap()}.rows-existing_rows) { self.write_buff('\n'); }
+		}
+		
+		
+		// start at the end
+        index = self.formated_text.len()-1;
+        character = self.formated_text.get(index).unwrap().text.len();
         //iter_valid(& self.formated_text,& mut index,& mut character);
 
 
@@ -1157,8 +1173,8 @@ impl BUFF<'_> {
         while prev {
 
             if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") == "\n" {
+				if row == 0 {break;}
                 row -= 1;
-                if row == 0 {break;}
             }
 
             prev = self.iter_prev(& mut index,& mut character);
@@ -1166,26 +1182,36 @@ impl BUFF<'_> {
         }
 
 
-        // set to given column
+        // set to given column if possible
         let mut next = true;
         while next {
 
             next = self.iter_next(& mut index,& mut character);
 
-			if column == 0 {break;} // TODO: this is there just to handle some edge-cases, investigate how do they happen
             column -= 1;
             if column == 0 {break;}
 
             if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") == "\n" {break;}
 
-
         }
 
-        self.set_cursor_safe(index, character);
 
-        for _ in 0..column { self.write_buff(' '); } // TODO: add spaces without style
+		// finally set cursor to calculated position
+        self.set_cursor(index, character);
+		
+		
+		// add spaces to reach desired column outside existing text
+		self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true}); // use neutral color
+		self.cursor_position_index += 1;
+		self.cursor_position_character = 0;
+		for _ in 0..column { self.write_buff(' '); } // add spaces without style
+		self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index-1).unwrap().style.clone(),updated:true}); // restore previous color
+		self.cursor_position_index += 1;
+		self.cursor_position_character = 0;
 
-        eprintln!("SET CURSOR POSITION (c{},r{}) -> (c{},r{}) -> (c{},r{}) = old->desired->final", old_col,old_row, des_col,des_row, self.get_cursor_c_safe(),self.get_cursor_r_safe() );
+
+		// print debug statistics
+        eprintln!("SET CURSOR POSITION (c{},r{}) -> (c{},r{}) -> (c{},r{}) = old->desired->final", old_col,old_row, des_col,des_row, self.get_cursor_c(),self.get_cursor_r() );
 
     }
 
@@ -1203,7 +1229,7 @@ impl BUFF<'_> {
 
 		dom structure:
 			index: index in vector of styled text chunks, should always point to existing one
-			character: index where next character will go - either existing position or len value
+			character: index where next character will go - either existing position or len value (note: this is u8 byte index not nth char index)
 			(cursor position is the character to be overwriten or nul char if at he end of char array)
 
 	*/
