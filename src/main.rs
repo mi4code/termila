@@ -410,7 +410,7 @@ impl BUFF<'_> {
                 current_escape: "".to_string(),
                 current_escape_max_length: 0,
                 cursor_position_index: 0,
-                cursor_position_character: 1,
+                cursor_position_character: 0,
                 handle_cr_next_time: false,
             })
         }
@@ -845,12 +845,24 @@ impl BUFF<'_> {
 					else if final_escape.ends_with("J") { // clear sequences
 						
 						// self.current_escape == "\x1b[0J" || self.current_escape == "\x1b[1J" || self.current_escape == "\x1b[2J" || self.current_escape == "\x1b[3J"
-						// TODO: there are actually some differences between these 
 						
-						// TODO: this would definitely break partial updates
-						self.formated_text = vec![BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true},];
-						self.cursor_position_index = 0;
-						self.cursor_position_character = 1;
+						if final_escape.ends_with("2J") || final_escape.ends_with("3J") { // entire screen
+							// TODO: there are actually some differences between these 
+							// TODO: this would definitely break partial updates
+							self.formated_text = vec![BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true},];
+							self.cursor_position_index = 0;
+							self.cursor_position_character = 0;
+						}
+						else if final_escape.ends_with("1J") { // from beginning to cursor
+							self.formated_text.drain(..self.cursor_position_index);
+							self.cursor_position_index = 0;
+							self.formated_text.get_mut(self.cursor_position_index).unwrap().text.drain(..self.cursor_position_character);
+							self.cursor_position_character = 0;
+						}
+						else /*final_escape.ends_with("0J") || final_escape.ends_with("J")*/ { // from end to cursor 
+							self.formated_text.truncate(self.cursor_position_index+1);
+							self.formated_text.get_mut(self.cursor_position_index).unwrap().text.truncate(self.cursor_position_character+1);
+						}
 
 					}
 					
