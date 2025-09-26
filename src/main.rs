@@ -84,9 +84,9 @@ impl OPTIONS {
 		
 		// saved_commands_file, history_file
 		
-		let saved_commands_file = "".to_string();
-		let mut history_file: String;
+		let saved_commands_file = std::env::var("TERMILA_SAVED_COMMANDS").unwrap_or_default();
 		
+		let mut history_file: String;
 		#[cfg(target_os = "linux")]
 		{ history_file = std::env::var("HOME").unwrap_or_default()+"/."+&shell+"_history"; }
 		#[cfg(target_os = "windows")]
@@ -116,7 +116,113 @@ impl UI {
             <body style="position: relative;">
 			
 				<!-- TERMINAL SPACE -->
-                <p id="console" onclick="document.querySelectorAll('#menu div').forEach(f=>f.style.visibility='hidden');" style="-webkit-user-select: text; margin: 0;  text-wrap: nowrap;"></p>
+                <p id="console" onclick="document.querySelectorAll('#menu button:has(+ div.popup)').forEach(f=>f.dataset.checked='false');/*document.querySelectorAll('#menu div').forEach(f=>f.style.visibility='hidden');*/" style="-webkit-user-select: text; margin: 0;  text-wrap: nowrap;"></p>
+				<script>
+				
+					function term_type(what) {
+						
+						if (typeof what == 'object'){ // key event
+						
+							if (document.activeElement.tagName != 'BODY'){return;} // allow interaction with other inputs too
+						
+							// TODO: other non letter characters
+							
+							if (what.ctrlKey && what.keyCode >= 65 && what.keyCode <= 90) { // ctrl a..z
+								if (what.ctrlKey && what.keyCode >= 67 && window.getSelection().toString() != '') {return;} // allow ctrl c copy
+								term_type( what.keyCode-64 );
+								what.preventDefault();
+							}
+							
+							else if (what.keyCode == 38 && what.type == 'keydown') { // up
+								term_type(27);
+								term_type(91);
+								term_type(65);
+								what.preventDefault();
+							}
+							else if (what.keyCode == 40 && what.type == 'keydown') { // down
+								term_type(27);
+								term_type(91);
+								term_type(66);
+								what.preventDefault();
+							}
+							else if (what.keyCode == 39 && what.type == 'keydown') { // right
+								term_type(27);
+								term_type(91);
+								term_type(67);
+								what.preventDefault();
+							}
+							else if (what.keyCode == 37 && what.type == 'keydown') { // left
+								term_type(27);
+								term_type(91);
+								term_type(68);
+								what.preventDefault();
+							}
+							
+							else if (event.keyCode == 27) { // esc
+								term_type(27);
+								what.preventDefault();
+							}
+							
+							else if (event.keyCode == 9) { // tab
+								term_type(9);
+								what.preventDefault();
+							}
+						
+							else if (event.keyCode == 8) { // backspace
+								term_type(8);
+								what.preventDefault();
+							}
+							
+							else if (what.charCode != 0) { term_type(String.fromCharCode(what.charCode)); what.preventDefault(); }
+							
+						}
+						
+						else if (typeof what == 'string') { // text
+							// encode string to bytes and then send it to terminal
+							const encoder = new TextEncoder(); // default is utf-8
+							const bytes = encoder.encode(what);
+							bytes.forEach( b => term_type(b) );
+						}
+						
+						else if (typeof what == 'number') { // byte
+							// type directly
+							key_term_handle(what);
+						}
+						
+					}
+					
+
+					document.addEventListener('keydown', function(event) { term_type(event); });
+
+					document.addEventListener('keypress', function(event) { term_type(event); });
+
+					document.addEventListener('paste', function(event) {
+						
+						// allow interaction with other inputs too
+						if (document.activeElement.tagName != 'BODY'){return;}
+
+						// stop data actually being pasted
+						event.stopPropagation();
+						event.preventDefault();
+
+						// get data
+						var clipboardData = event.clipboardData || window.clipboardData;
+						term_type(clipboardData);
+						
+					});
+					
+					document.addEventListener("selectionchange", (event) => {
+						// dont allow interactions with other inputs delete our selection
+						if (document.activeElement.tagName != 'BODY'){return;}
+						
+						// save selected text
+						document.querySelector('#console').dataset.selection=window.getSelection().toString();
+
+						// TODO: save and restore selection on focus out/in
+					});
+
+
+				</script>
 				
 				
 				<!-- POPUP BUTTONS -->
@@ -137,97 +243,68 @@ impl UI {
                             min-width: unset;
                             margin: 5px 0;
                             padding: unset;
-                        }
-                        
-                        #menu div {
-							transition: visibility 0.3s;
-                            visibility: hidden;
-                            position: absolute;
-                            translate: 0px -30px;
-                            right:100%;
-                            margin-right:30px;
-                            background-color: var(--hui_style_background_color);
-                            width: 300px; 
-                            height: 300px; 
-							overflow-y: scroll;
-							overflow-x: hidden;
-							padding: 5px;
-							border-radius: 5px;
-							opacity: 0.8;
+							
+							opacity: 0;
+							transition: opacity 1s;
                         }
 						
-						#menu > button {
-							opacity: 0;
-						}
-						#menu:hover > button, #menu:has(div[style*="visibility: visible;"]) > button {
+						#menu:hover > button, #menu:has(div[style*="visibility: visible;"]) > button, #menu:has(button[data-checked='true'] + div.popup) > button {
 							opacity: 1;
 							transition: opacity 1s;
 						}
-						
                         
+						
+                        #menu div.popup {
+                            position: absolute;
+                            translate: 0px -30px;
+                            right: 100%;
+                            width: 300px; 
+                            height: 300px; 
+							margin-right: 30px;
+							
+							background-color: var(--hui_style_background_color);
+							opacity: 0.8;
+							padding: 5px;
+							border-radius: 5px;
+							overflow-y: scroll;
+							overflow-x: hidden;
+							
+							visibility: hidden;
+							transition: visibility 0.5s;
+                        }
+						
+						#menu button[data-checked='true'] + div.popup {
+							visibility: visible;
+							transition: visibility 0.5s;
+						}
+						
+						
+                        #menu div.toast {
+                            position: absolute;
+                            translate: 0px -30px;
+                            right:100%;
+                            width: auto; 
+                            max-height: 30px; 
+							margin-right: 30px;
+							
+							background-color: var(--hui_style_background_color);
+							opacity: 0.8;
+							padding: 5px;
+							border-radius: 5px;
+							text-wrap: nowrap; 
+							text-align: start;
+							
+							visibility: hidden;
+							transition: visibility 0.5s;
+                        }
+						
+						#menu button:hover + div.toast {
+							visibility: visible;
+							transition: visibility 0.5s;
+						}
+						
                     </style>
-                    
-                    <button id="ai" onmousedown="this.dataset.selection = window.getSelection().toString();">AI</button>
-                    <div id="ai">
-						<h3>ASK AI</h3>
-						<input type="text" onchange="
-							const API_KEY = 'YOUR_API_KEY_HERE';
-							(async function () {
-								const response = await fetch('http://127.0.0.1:8080/v1/completions' /*'https://api.openai.com/v1/completions'*/, {
-									method: 'POST',
-									headers: {
-										Authorization: `Bearer ${API_KEY}`,
-										'Content-Type': 'application/json',
-									},
-									body: JSON.stringify({
-										model: 'YOUR_MODEL_HERE',
-										//prompt: window.getSelection().toString()+'\n\n'+this.value,
-										prompt: document.querySelector('#menu button#ai').dataset.selection+'\n\n'+this.value,
-										max_tokens: 50,
-								}),
-							  });
-							  const data = await response.json();
-							  console.log(data);
-							  //this.parentElement.lastChild.innerText = data.choices[0].text;
-							  document.querySelector('#menu div#ai p').innerText = data.choices[0].text;
-							})();
-						">
-						<h3>RESPONSE</h3>
-						<p></p>
-					</div> 
-                    
-                    <button id="saved">SS</button>
-                    <div id="saved"></div>
 					
-                    <button id="history">HI</button>
-                    <div id="history"></div> 
-					
-					<button id="autoscroll" onclick="this.checked = !this.checked; document.querySelector('div#autoscroll').innerHTML = this.checked ? 'auto-scroll disabled' : 'auto-scroll enabled'; setTimeout(()=>{document.querySelector('div#autoscroll').style.visibility='hidden';},1000);" checked>SC</button>
-                    <div id="autoscroll">
-						<style>
-							/*body:has(button#autoscroll:hover) div#autoscroll {
-								width: 200px !important;
-								transition: width 2s;
-								opacity: 0.7;
-							}*/
-						</style>
-						<!--
-						<button id="autoscroll-icon" style="position: fixed; right: 10px; bottom: 10px; width: 30px; height: 30px; min-width: unset; z-index: 9; padding: unset;" >&#11015;</button>
-						<button id="autoscroll-popup" style="position: fixed; right: 10px; bottom: 10px; width: 30px; height: 30px; min-width: unset; z-index: 8; padding: unset; padding-left: 10px; text-wrap: nowrap; text-align: start;" tabindex="-1" opacity: 0;>auto-scroll enabled</button>
-						-->
-					</div> 
-					
-					<button id="dbg">DG</button>
-					<div id="dbg" style="display: none; position: fixed; right: 10px; top: 35%; bottom: 35%; width: 30%; height: auto; min-width: unset; padding: 5%; background-color: rgba(50,30,30,0.5)">
-						<p>DEBUG</p>
-						<br>
-						<input type="text" id="buffer">
-						<br>
-						<button id="submit" onclick="this.checked = true;">submit</button>
-						<br>
-						<button id="read" onclick="this.checked = true;">read</button>
-					</div>
-                
                 </div>
 				
             </body>
@@ -235,7 +312,7 @@ impl UI {
         //webview.html_element("body p", "", ""); // HUI bug
 
 
-        // add keypress callback and event listener + handle copy/paste
+        // add keypress callback
         let key_term_handle = webview.call_native( move |args| {
                 if let Some(arg) = args.get(0) {
                     if let Ok(val) = arg.parse::<u8>() {
@@ -245,102 +322,8 @@ impl UI {
                 }
             }, None );
         webview.call_js(&format!("var key_term_handle = {};", key_term_handle), Some(false));
-        webview.call_js("
-			function term_type(what) {
-				
-				if (typeof what == 'object'){ // key event
-				
-					if (document.activeElement.tagName != 'BODY'){return;} // allow interaction with other inputs too
-				
-					// TODO: other non letter characters
-					
-					if (what.ctrlKey && what.keyCode >= 65 && what.keyCode <= 90) { // ctrl a..z
-						if (what.ctrlKey && what.keyCode >= 67 && window.getSelection().toString() != '') {return;} // allow ctrl c copy
-						term_type( what.keyCode-64 );
-						what.preventDefault();
-					}
-					
-					else if (what.keyCode == 38) { // up
-						term_type(27);
-						term_type(91);
-						term_type(65);
-						what.preventDefault();
-					}
-					else if (what.keyCode == 40) { // down
-						term_type(27);
-						term_type(91);
-						term_type(66);
-						what.preventDefault();
-					}
-					else if (what.keyCode == 39) { // right
-						term_type(27);
-						term_type(91);
-						term_type(67);
-						what.preventDefault();
-					}
-					else if (what.keyCode == 37) { // left
-						term_type(27);
-						term_type(91);
-						term_type(68);
-						what.preventDefault();
-					}
-					
-					else if (event.keyCode == 27) { // esc
-						term_type(27);
-						what.preventDefault();
-					}
-					
-					else if (event.keyCode == 9) { // tab
-						term_type(9);
-						what.preventDefault();
-					}
-				
-					else if (event.keyCode == 8) { // backspace
-						term_type(8);
-						what.preventDefault();
-					}
-					
-					else if (what.charCode != 0) { term_type(String.fromCharCode(what.charCode)); what.preventDefault(); }
-					
-				}
-				
-				else if (typeof what == 'string') { // text
-					// encode string to bytes and then send it to terminal
-					const encoder = new TextEncoder(); // default is utf-8
-					const bytes = encoder.encode(what);
-					bytes.forEach( b => term_type(b) );
-				}
-				
-				else if (typeof what == 'number') { // byte
-					// type directly
-					key_term_handle(what);
-				}
-				
-			}
-			
-
-            document.addEventListener('keydown', function(event) { term_type(event); });
-
-            document.addEventListener('keypress', function(event) { term_type(event); });
-
-            document.addEventListener('paste', function(event) {
-				
-				// allow interaction with other inputs too
-				if (document.activeElement.tagName != 'BODY'){return;}
-
-                // stop data actually being pasted
-                event.stopPropagation();
-                event.preventDefault();
-
-                // get data
-                var clipboardData = event.clipboardData || window.clipboardData;
-				term_type(clipboardData);
-				
-            });
-			
-			
-		", Some(false));
-
+       
+	   
         // automatically set terminal size
         webview.call_js(&format!(r#"
             window.addEventListener('resize', () => {{
@@ -407,21 +390,25 @@ impl UI {
 		
 		// popups
 		
-		// TODO: create better popup interface
-		
 		//webview.call_js(&format!("document.querySelector('#menu button#saved').onclick = function(){{ if (this.style.visibility=='hidden'){{ this.style.visibility=''; ( {} )(); }}else{{ this.style.visibility='hidden'; }} }}", webview.call_native( /*move*/ |args| {  /*webview.call_js(&format!("document.querySelector('#menu div#saved').innerHTML = {}", UI::popup_saved()),Some(false));*/  }, None)), Some(false));
 		// TODO: HUI limitation - doesnt allow HUI calls within call_native 
-		
-		self_.webview.call_js(&format!("document.querySelector('#menu div#saved').innerHTML = `{}`;", self_.popup_saved()), Some(false));
-		self_.webview.call_js(&format!("document.querySelector('#menu div#history').innerHTML = `{}`;", self_.popup_history()), Some(false));
 
-		self_.webview.call_js("['ai','saved','history','autoscroll'].forEach((e) => {{ document.querySelector('#menu button#'+e).onclick = function(){{ if (document.querySelector('#menu div#'+e).style.visibility=='visible'){{ document.querySelector('#menu div#'+e).style.visibility='hidden'; }}else{{ document.querySelector('#menu div#'+e).style.visibility='visible'; }} }} }})", Some(false));
-
-
+		self_.popup_ai();
+		self_.popup_saved();
+		self_.popup_history();
+		self_.popup_autoscroll();
+		self_.popup_debug();
 
 		self_
-		
     }
+	
+	
+	fn add_popup(&self, id: &str, button: &str, body: &str, is_toast_not_popup: bool){
+		//self.webview.call_js( &format!( r#" document.querySelector('#menu').innerHTML += `<button id="{}" onclick="if(document.querySelector('#menu div#'+this.id).className=='toast'){{return;}} if (document.querySelector('#menu div#'+this.id).style.visibility=='visible'){{document.querySelector('#menu div#'+this.id).style.visibility='hidden';}} else{{document.querySelector('#menu div#'+this.id).style.visibility='visible';}}">{}</button> <div id="{}" class="{}">{}</div>`; "# , id, button, id, if is_toast_not_popup {"toast"} else {"popup"}, body) , Some(false));
+		self.webview.call_js( &format!( r#" document.querySelector('#menu').innerHTML += `<button id="{}" onclick="this.dataset.checked = (!(this.dataset.checked=='true')).toString()">{}</button> <div id="{}" class="{}">{}</div>`; "# , id, button, id, if is_toast_not_popup {"toast"} else {"popup"}, body) , Some(false));
+		// you can edit the element any time later using js
+		// warning: js inside <script> or onload="" will not get executed 
+	}
 	
 	
     fn update (&mut self, formated_text: &/*mut*/ Vec<BUFF_formated_text>) {
@@ -439,48 +426,130 @@ impl UI {
         // TODO: clear blanks here to sync with html dom, apply clear sequences (segments should have an id paired with dom id, if it gets updated to blank both get deleted here) -- part of partial updates, which it will be possible to implement as soon as the writing/positioning is reliable enough
 
         // autoscroll
-        self.webview.call_js("if (document.querySelector('button#autoscroll').checked) {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
+        self.webview.call_js("if (document.querySelector('#menu button#autoscroll').dataset.checked!='true') {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
 		// TODO: better scrolling (hide initial free lines + scroll to current cursor position)
 
     }
 	
-	
-	fn popup_history (&self) -> String {
-		let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.history_file.clone()) {
-			Ok(f) => f,
-			Err(_) => return "<p>HISTORY FILE NOT FOUND!</p>".to_string(),
-		};
-		let mut reader = BufReader::new(file);
-		reader.seek(SeekFrom::End(-min(/*file.metadata().expect("REASON").len().try_into().unwrap()*/100000,1024))); // TODO: smarter limit (choose by number of lines or auto-load previous)
-		return reader.lines().map(|line| format!("<p onclick=\"term_type(this.innerHTML);\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">{}</p>", line.unwrap())).collect(); 
-	}
-	fn popup_saved (&self) -> String {
-		let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.saved_commands_file.clone()) {
-			Ok(f) => f,
-			Err(_) => return "<p>SAVED COMMANDS FILE NOT FOUND!</p>".to_string(),
-		};
-		let mut reader = BufReader::new(file);
-		
-		let mut html = "<p onclick=\"\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">".to_string();
-		for line0 in reader.lines() {
-			let line = line0.unwrap(); 
-			html.push_str(&line);
-			html.push_str("<br>");
-			if line == "" {
-				html.push_str("</p><p onclick=\"term_type(this.innerText.split('\\\\n').filter(f => f != '').findLast(f=>true));\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">");
-			}
-		}
-		html.push_str("</p>");
-
-		return html; 
-	}
 	fn popup_ai (&self) {
-		// TODO: move code here, use api key
+		self.add_popup(
+			"ai",
+			"AI", 
+			r#"
+			<h3>ASK AI</h3>
+			<input type="text" onchange="
+				const API_KEY = 'YOUR_API_KEY_HERE';
+				(async function () {
+					document.activeElement.blur();
+					const response = await fetch('http://127.0.0.1:8080/v1/chat/completions' /*'https://api.openai.com/v1/chat/completions'*/, {
+						method: 'POST',
+						headers: {
+							Authorization: 'Bearer '+API_KEY,
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify({
+							model: 'gpt-4o-mini',
+							messages: [
+								{ role: 'system', content: 'You are a helpful assistant. \\nYou help the user with terminal interaction by explaining commands, giving solutions to errors and evaluating safety of commands. \\nAnswer shortly, dont use markdown.' },
+								{ role: 'user', content: document.querySelector('#console').dataset.selection+'\\n\\n'+document.querySelector('div#ai input').value }
+							],
+							max_tokens: 50
+						}),
+				  });
+				  const data = await response.json();
+				  console.log(data);
+				  //this.parentElement.lastChild.innerText = data.choices[0].message.content;
+				  document.querySelector('#menu div#ai p').innerText = data.choices[0].message.content;
+				})();
+			">
+			<h3>RESPONSE</h3>
+			<p></p>
+			"#, 
+			false
+		);
+		// TODO: support continuous chat and chat export
 	}
+	
+	fn popup_saved (&self) {
+		let body = (||{
+			let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.saved_commands_file.clone()) {
+				Ok(f) => f,
+				Err(_) => return "<p>SAVED COMMANDS FILE NOT FOUND!</p>".to_string(),
+			};
+			let mut reader = BufReader::new(file);
+			
+			let mut html = "<p onclick=\"\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">".to_string();
+			for line0 in reader.lines() {
+				let line = line0.unwrap(); 
+				html.push_str(&line);
+				html.push_str("<br>");
+				if line == "" {
+					html.push_str("</p><p onclick=\"term_type(this.innerText.split('\\\\n').filter(f => f != '').findLast(f=>true));\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">");
+				}
+			}
+			html.push_str("</p>");
+
+			return html; 
+		})();
+		self.add_popup("saved", "SS", &body, false);
+	}
+		
+	fn popup_history (&self) {
+		let body = (||{
+			let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.history_file.clone()) { // TODO: auto-reload on each open
+				Ok(f) => f,
+				Err(_) => return "<p>HISTORY FILE NOT FOUND!</p>".to_string(),
+			};
+			let start = -(file.metadata().expect("REASON").len().saturating_sub(10240) as i64);
+			let mut reader = BufReader::new(file);
+			reader.seek(SeekFrom::End(start)); // TODO: auto-load all previous (efficiently)
+			return reader.lines().map(|line| format!("<p onclick=\"term_type(this.innerHTML);\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">{}</p>", line.unwrap())).collect(); 
+		})();
+		self.add_popup("history", "HI", &body, false);
+	}
+
+	fn popup_autoscroll (&self) {
+		self.add_popup(
+			"autoscroll",
+			"AS", 
+			r#"
+			<span></span>
+			<style>
+				button#autoscroll[data-checked='true'] + div span::before {
+					content: 'auto-scroll disabled';
+				}
+				#autoscroll:not(button#autoscroll[data-checked='true']) + div span::before {
+					content: 'auto-scroll enabled';
+				}
+			</style>
+			"#, 
+			true
+		);
+	}
+
+	fn popup_debug (&self) {
+		self.add_popup(
+			"dbg",
+			"DG", 
+			r#"
+			<p>DEBUG</p>
+			<br>
+			<input type="text" id="buffer">
+			<br>
+			<button id="submit" onclick="this.checked = true;">submit</button>
+			<br>
+			<button id="read" onclick="this.checked = true;">read</button>
+			"#, 
+			false
+		);
+	}
+
+	// TODO: custom popup_* -> plugin interface = just shared object with one function `void termila_custom_popup_init(void* webview, function add_popup);`
+	
 	
 	fn debug_pty_read(&mut self) -> char {
 		
-		self.webview.call_js("document.querySelector('#dbg').style.display='';", Some(false));
+		self.webview.call_js("document.querySelector('div#dbg').style.display='';", Some(false));
 		
 		if self.webview.call_js("document.querySelector('#dbg #read').checked;", Some(true)) == "true" {
 			self.webview.call_js("document.querySelector('#dbg #read').checked=false;", Some(false));
