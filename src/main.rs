@@ -2,6 +2,10 @@ use HUI::*;
 use std::{thread, time::Duration};
 use std::collections::HashMap;
 use std::env;
+use std::fs::File;
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::BufRead;
+use std::cmp::min;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
@@ -46,8 +50,8 @@ struct OPTIONS {
 	*/
     // TODO: color_override: String, // CSS function(s) to modify colors
     // TODO: bell_audio: String, // bell audio file
-    // TODO: saved_commands: String, // file with saved commands
-	// TODO: saved_history: String, // file with shell history (to allow history modifications)
+    saved_commands_file: String, // file with saved commands
+	history_file: String, // file with shell history (to allow history modifications)
     // TODO: shell profiles / any shortcuts
 }
 impl OPTIONS {
@@ -76,9 +80,20 @@ impl OPTIONS {
 		// term
 		
 		let term = std::env::var("TERM").unwrap_or_else(|_| "xterm".to_string());
+		
+		
+		// saved_commands_file, history_file
+		
+		let saved_commands_file = "".to_string();
+		let mut history_file: String;
+		
+		#[cfg(target_os = "linux")]
+		{ history_file = std::env::var("HOME").unwrap_or_default()+"/."+&shell+"_history"; }
+		#[cfg(target_os = "windows")]
+		{ history_file = "".to_string(); } // windows cmd.exe doesnt store history
 
 
-		return Self {shell, shell_args, term, };
+		return Self {shell, shell_args, term, saved_commands_file, history_file, };
 	}
 }
 
@@ -97,42 +112,124 @@ impl UI {
         // setup UI
         webview.load_str(r#"<!DOCTYPE html>
         <html>
+			<head></head>
             <body style="position: relative;">
 			
 				<!-- TERMINAL SPACE -->
-                <p id="console" style="-webkit-user-select: text; margin: 0;  text-wrap: nowrap;"></p>
+                <p id="console" onclick="document.querySelectorAll('#menu div').forEach(f=>f.style.visibility='hidden');" style="-webkit-user-select: text; margin: 0;  text-wrap: nowrap;"></p>
 				
-                <button id="ai" style="position: fixed; right: 10px; top: 10px; width: 30px; height: 30px; min-width: unset; padding: unset;">AI</button>
+				
+				<!-- POPUP BUTTONS -->
+                <div id="menu">
+                	<style>
+                    	
+                        #menu {
+                        	position: fixed;
+                            top: 10px;
+                            right: 10px; 
+                            width: 30px;
+                            max-height: 100vh;
+                    	}
+                        
+                        #menu > button {
+                        	width: 30px; 
+                            height: 30px; 
+                            min-width: unset;
+                            margin: 5px 0;
+                            padding: unset;
+                        }
+                        
+                        #menu div {
+							transition: visibility 0.3s;
+                            visibility: hidden;
+                            position: absolute;
+                            translate: 0px -30px;
+                            right:100%;
+                            margin-right:30px;
+                            background-color: var(--hui_style_background_color);
+                            width: 300px; 
+                            height: 300px; 
+							overflow-y: scroll;
+							overflow-x: hidden;
+							padding: 5px;
+							border-radius: 5px;
+							opacity: 0.8;
+                        }
+						
+						#menu > button {
+							opacity: 0;
+						}
+						#menu:hover > button, #menu:has(div[style*="visibility: visible;"]) > button {
+							opacity: 1;
+							transition: opacity 1s;
+						}
+						
+                        
+                    </style>
+                    
+                    <button id="ai" onmousedown="this.dataset.selection = window.getSelection().toString();">AI</button>
+                    <div id="ai">
+						<h3>ASK AI</h3>
+						<input type="text" onchange="
+							const API_KEY = 'YOUR_API_KEY_HERE';
+							(async function () {
+								const response = await fetch('http://127.0.0.1:8080/v1/completions' /*'https://api.openai.com/v1/completions'*/, {
+									method: 'POST',
+									headers: {
+										Authorization: `Bearer ${API_KEY}`,
+										'Content-Type': 'application/json',
+									},
+									body: JSON.stringify({
+										model: 'YOUR_MODEL_HERE',
+										//prompt: window.getSelection().toString()+'\n\n'+this.value,
+										prompt: document.querySelector('#menu button#ai').dataset.selection+'\n\n'+this.value,
+										max_tokens: 50,
+								}),
+							  });
+							  const data = await response.json();
+							  console.log(data);
+							  //this.parentElement.lastChild.innerText = data.choices[0].text;
+							  document.querySelector('#menu div#ai p').innerText = data.choices[0].text;
+							})();
+						">
+						<h3>RESPONSE</h3>
+						<p></p>
+					</div> 
+                    
+                    <button id="saved">SS</button>
+                    <div id="saved"></div>
+					
+                    <button id="history">HI</button>
+                    <div id="history"></div> 
+					
+					<button id="autoscroll" onclick="this.checked = !this.checked; document.querySelector('div#autoscroll').innerHTML = this.checked ? 'auto-scroll disabled' : 'auto-scroll enabled'; setTimeout(()=>{document.querySelector('div#autoscroll').style.visibility='hidden';},1000);" checked>SC</button>
+                    <div id="autoscroll">
+						<style>
+							/*body:has(button#autoscroll:hover) div#autoscroll {
+								width: 200px !important;
+								transition: width 2s;
+								opacity: 0.7;
+							}*/
+						</style>
+						<!--
+						<button id="autoscroll-icon" style="position: fixed; right: 10px; bottom: 10px; width: 30px; height: 30px; min-width: unset; z-index: 9; padding: unset;" >&#11015;</button>
+						<button id="autoscroll-popup" style="position: fixed; right: 10px; bottom: 10px; width: 30px; height: 30px; min-width: unset; z-index: 8; padding: unset; padding-left: 10px; text-wrap: nowrap; text-align: start;" tabindex="-1" opacity: 0;>auto-scroll enabled</button>
+						-->
+					</div> 
+					
+					<button id="dbg">DG</button>
+					<div id="dbg" style="display: none; position: fixed; right: 10px; top: 35%; bottom: 35%; width: 30%; height: auto; min-width: unset; padding: 5%; background-color: rgba(50,30,30,0.5)">
+						<p>DEBUG</p>
+						<br>
+						<input type="text" id="buffer">
+						<br>
+						<button id="submit" onclick="this.checked = true;">submit</button>
+						<br>
+						<button id="read" onclick="this.checked = true;">read</button>
+					</div>
                 
-				<!-- AUTO-SCROLL BUTTON -->
-				<button id="autoscroll-icon" style="position: fixed; right: 10px; bottom: 10px; width: 30px; height: 30px; min-width: unset; z-index: 9; padding: unset;" onclick="this.checked = !this.checked; document.querySelector('#autoscroll-popup').innerHTML = this.checked ? 'auto-scroll disabled' : 'auto-scroll enabled';" checked>&#11015;</button>
-				<button id="autoscroll-popup" style="position: fixed; right: 10px; bottom: 10px; width: 30px; height: 30px; min-width: unset; z-index: 8; padding: unset; padding-left: 10px; text-wrap: nowrap; text-align: start;" tabindex="-1" opacity: 0;>auto-scroll enabled</button>
-                <style>
-					body:has(#autoscroll-icon:hover) #autoscroll-popup {
-						width: 200px !important;
-						transition: width 2s;
-						opacity: 0.7;
-					}
-				</style>
+                </div>
 				
-				<div id="dbg" style="display: none; position: fixed; right: 10px; top: 35%; bottom: 35%; width: 30%; height: auto; min-width: unset; padding: 5%; background-color: rgba(50,30,30,0.5)">
-					<p>DEBUG</p>
-					<br>
-					<input type="text" id="buffer">
-					<br>
-					<button id="submit" onclick="this.checked = true;">submit</button>
-					<br>
-					<button id="read" onclick="this.checked = true;">read</button>
-				</div>
-				
-				<style>
-                    body button:not(#dbg button) {
-                        opacity: 0;
-                    }
-                    body:has(button:hover) button:not(#dbg button):not(#autoscroll-popup){
-                        opacity: 0.7;
-                    }
-                </style>
             </body>
         </html>"#);
         //webview.html_element("body p", "", ""); // HUI bug
@@ -149,73 +246,100 @@ impl UI {
             }, None );
         webview.call_js(&format!("var key_term_handle = {};", key_term_handle), Some(false));
         webview.call_js("
-            document.addEventListener('keydown', function(event) {
+			function term_type(what) {
 				
-				if (document.activeElement.tagName != 'BODY'){return;} // allow interaction with other inputs too
-
-                if (event.ctrlKey && event.keyCode >= 65 && event.keyCode <= 90) { // ctrl a..z
-                    if (event.ctrlKey && event.keyCode >= 67 && window.getSelection().toString() != '') {return;} // ctrl c copy
-                    key_term_handle( event.keyCode-64 );
-                    // TODO: other non letter characters
-                }
-
-                else if (event.keyCode == 38) { // up
-                    key_term_handle(27);
-                    key_term_handle(91);
-                    key_term_handle(65);
-                    event.preventDefault();
-                }
-                else if (event.keyCode == 40) { // down
-                    key_term_handle(27);
-                    key_term_handle(91);
-                    key_term_handle(66);
-                    event.preventDefault();
-                }
-                else if (event.keyCode == 39) { // right
-                    key_term_handle(27);
-                    key_term_handle(91);
-                    key_term_handle(67);
-                    event.preventDefault();
-
-                }
-                else if (event.keyCode == 37) { // left
-                    key_term_handle(27);
-                    key_term_handle(91);
-                    key_term_handle(68);
-                    event.preventDefault();
-                }
-
-                else if (event.keyCode == 27) { // esc (also escape character so can be evil)
-                    key_term_handle(27);
-                }
-
-            });
-
-            document.addEventListener('keypress', function(event) {
+				if (typeof what == 'object'){ // key event
 				
-				if (document.activeElement.tagName != 'BODY'){return;} // allow interaction with other inputs too
+					if (document.activeElement.tagName != 'BODY'){return;} // allow interaction with other inputs too
 				
-                key_term_handle(event.keyCode); // TODO: support non-utf8 input, fix windows arrows
+					// TODO: other non letter characters
+					
+					if (what.ctrlKey && what.keyCode >= 65 && what.keyCode <= 90) { // ctrl a..z
+						if (what.ctrlKey && what.keyCode >= 67 && window.getSelection().toString() != '') {return;} // allow ctrl c copy
+						term_type( what.keyCode-64 );
+						what.preventDefault();
+					}
+					
+					else if (what.keyCode == 38) { // up
+						term_type(27);
+						term_type(91);
+						term_type(65);
+						what.preventDefault();
+					}
+					else if (what.keyCode == 40) { // down
+						term_type(27);
+						term_type(91);
+						term_type(66);
+						what.preventDefault();
+					}
+					else if (what.keyCode == 39) { // right
+						term_type(27);
+						term_type(91);
+						term_type(67);
+						what.preventDefault();
+					}
+					else if (what.keyCode == 37) { // left
+						term_type(27);
+						term_type(91);
+						term_type(68);
+						what.preventDefault();
+					}
+					
+					else if (event.keyCode == 27) { // esc
+						term_type(27);
+						what.preventDefault();
+					}
+					
+					else if (event.keyCode == 9) { // tab
+						term_type(9);
+						what.preventDefault();
+					}
+				
+					else if (event.keyCode == 8) { // backspace
+						term_type(8);
+						what.preventDefault();
+					}
+					
+					else if (what.charCode != 0) { term_type(String.fromCharCode(what.charCode)); what.preventDefault(); }
+					
+				}
+				
+				else if (typeof what == 'string') { // text
+					// encode string to bytes and then send it to terminal
+					const encoder = new TextEncoder(); // default is utf-8
+					const bytes = encoder.encode(what);
+					bytes.forEach( b => term_type(b) );
+				}
+				
+				else if (typeof what == 'number') { // byte
+					// type directly
+					key_term_handle(what);
+				}
+				
+			}
+			
 
-            });
+            document.addEventListener('keydown', function(event) { term_type(event); });
+
+            document.addEventListener('keypress', function(event) { term_type(event); });
 
             document.addEventListener('paste', function(event) {
+				
+				// allow interaction with other inputs too
+				if (document.activeElement.tagName != 'BODY'){return;}
 
                 // stop data actually being pasted
                 event.stopPropagation();
                 event.preventDefault();
 
-                // get data as bytes
+                // get data
                 var clipboardData = event.clipboardData || window.clipboardData;
-                const encoder = new TextEncoder(); // default is utf-8
-                const bytes = encoder.encode(clipboardData.getData('Text'));
-
-                // send bytes to terminal
-                bytes.forEach( b => key_term_handle(b) );
-
+				term_type(clipboardData);
+				
             });
-        ", Some(false));
-
+			
+			
+		", Some(false));
 
         // automatically set terminal size
         webview.call_js(&format!(r#"
@@ -237,6 +361,8 @@ impl UI {
 
                 const cols = Math.floor(window.innerWidth / charWidth);
                 const rows = Math.floor(window.innerHeight / charHeight);
+				
+				console.log(cols, rows);
 
                 ({})(cols, rows);
 
@@ -274,10 +400,27 @@ impl UI {
 
             }, None)
         ), Some(false));
+		
+		
+		let self_ = Self { webview };
+		
+		
+		// popups
+		
+		// TODO: create better popup interface
+		
+		//webview.call_js(&format!("document.querySelector('#menu button#saved').onclick = function(){{ if (this.style.visibility=='hidden'){{ this.style.visibility=''; ( {} )(); }}else{{ this.style.visibility='hidden'; }} }}", webview.call_native( /*move*/ |args| {  /*webview.call_js(&format!("document.querySelector('#menu div#saved').innerHTML = {}", UI::popup_saved()),Some(false));*/  }, None)), Some(false));
+		// TODO: HUI limitation - doesnt allow HUI calls within call_native 
+		
+		self_.webview.call_js(&format!("document.querySelector('#menu div#saved').innerHTML = `{}`;", self_.popup_saved()), Some(false));
+		self_.webview.call_js(&format!("document.querySelector('#menu div#history').innerHTML = `{}`;", self_.popup_history()), Some(false));
+
+		self_.webview.call_js("['ai','saved','history','autoscroll'].forEach((e) => {{ document.querySelector('#menu button#'+e).onclick = function(){{ if (document.querySelector('#menu div#'+e).style.visibility=='visible'){{ document.querySelector('#menu div#'+e).style.visibility='hidden'; }}else{{ document.querySelector('#menu div#'+e).style.visibility='visible'; }} }} }})", Some(false));
 
 
 
-		Self { webview }
+		self_
+		
     }
 	
 	
@@ -296,10 +439,44 @@ impl UI {
         // TODO: clear blanks here to sync with html dom, apply clear sequences (segments should have an id paired with dom id, if it gets updated to blank both get deleted here) -- part of partial updates, which it will be possible to implement as soon as the writing/positioning is reliable enough
 
         // autoscroll
-        self.webview.call_js("if (document.querySelector('#autoscroll-icon').checked) {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
+        self.webview.call_js("if (document.querySelector('button#autoscroll').checked) {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
+		// TODO: better scrolling (hide initial free lines + scroll to current cursor position)
 
     }
 	
+	
+	fn popup_history (&self) -> String {
+		let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.history_file.clone()) {
+			Ok(f) => f,
+			Err(_) => return "<p>HISTORY FILE NOT FOUND!</p>".to_string(),
+		};
+		let mut reader = BufReader::new(file);
+		reader.seek(SeekFrom::End(-min(/*file.metadata().expect("REASON").len().try_into().unwrap()*/100000,1024))); // TODO: smarter limit (choose by number of lines or auto-load previous)
+		return reader.lines().map(|line| format!("<p onclick=\"term_type(this.innerHTML);\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">{}</p>", line.unwrap())).collect(); 
+	}
+	fn popup_saved (&self) -> String {
+		let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.saved_commands_file.clone()) {
+			Ok(f) => f,
+			Err(_) => return "<p>SAVED COMMANDS FILE NOT FOUND!</p>".to_string(),
+		};
+		let mut reader = BufReader::new(file);
+		
+		let mut html = "<p onclick=\"\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">".to_string();
+		for line0 in reader.lines() {
+			let line = line0.unwrap(); 
+			html.push_str(&line);
+			html.push_str("<br>");
+			if line == "" {
+				html.push_str("</p><p onclick=\"term_type(this.innerText.split('\\\\n').filter(f => f != '').findLast(f=>true));\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">");
+			}
+		}
+		html.push_str("</p>");
+
+		return html; 
+	}
+	fn popup_ai (&self) {
+		// TODO: move code here, use api key
+	}
 	
 	fn debug_pty_read(&mut self) -> char {
 		
@@ -1398,6 +1575,8 @@ struct PTY {
 	
 	rows: usize,
     columns: usize,
+	
+	write_cache: Vec<u8>
 }
 #[cfg(target_os = "windows")]
 impl PTY {
@@ -1446,6 +1625,7 @@ impl PTY {
             // these handles were cloned by the conpty and we dont need them anymore
             CloseHandle(in_read);
             CloseHandle(out_write);
+			
 
             // add child process to the pseudo console
 			
@@ -1514,7 +1694,7 @@ impl PTY {
             DeleteProcThreadAttributeList(si_ex.lpAttributeList);
             windows::Win32::System::Memory::HeapFree( heap, windows::Win32::System::Memory::HEAP_FLAGS(0), Some(si_ex.lpAttributeList.0 as *mut _) );
 			
-            Some( Self{ in_write, out_read, hpc, pi, rows: 999, columns: 999, })
+            Some( Self{ in_write, out_read, hpc, pi, rows: 999, columns: 999, write_cache: vec![], })
         }
     }
 
@@ -1532,16 +1712,37 @@ impl PTY {
 	}
 
     fn write(&mut self, b: u8) -> bool {
-        unsafe {
-            //let mut written = 0u32;
-            !WriteFile(
-                self.in_write,
-                Some(&[b]), // data to be written
-                None, //Some(&mut written as *mut u32), // number of bytes written (optional, not needed)
-                None,
-            )
-            .is_err()
-        }
+		if b == 0x1B || b == b'[' {
+			self.write_cache.push(b);
+			return true;
+		}
+		return
+		if self.write_cache.is_empty(){
+			unsafe {
+				//let mut written = 0u32;
+				!WriteFile(
+					self.in_write,
+					Some(&[b]), // data to be written  // TODO: windows doesnt allow us to write vt sequences by byte so current code doesnt work but this does: Some(&[27,91,65]), current solution is workaround
+					None, //Some(&mut written as *mut u32), // number of bytes written (optional, not needed)
+					None,
+				)
+				.is_err()
+			}
+		}
+		else {
+			self.write_cache.push(b);
+			unsafe {
+				!WriteFile(
+					self.in_write,
+					Some(&self.write_cache),
+					None,
+					None,
+				)
+				.is_err();
+			}
+			self.write_cache = vec![];
+			true
+		}
     }
 
     fn read(&mut self) -> u8 {
@@ -1642,12 +1843,13 @@ fn read_char<F>(mut read: F) -> char  where F: FnMut() -> u8 {
 
 // unsafe (because of threads)
 static mut CURRENT_PTY: Option<PTY> = None;
+static mut CURRENT_OPTIONS: Option<OPTIONS> = None;
 
 fn main() {
 	
 	// load options
 	let options = OPTIONS::new();
-
+	unsafe {CURRENT_OPTIONS = Some(OPTIONS::new());}
 
     // setup terminal
     let pty = match PTY::new(options.shell, options.shell_args, options.term) {
