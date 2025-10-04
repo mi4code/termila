@@ -17,7 +17,7 @@
  - [ ] visible customizable cursor
  - [x] support for non-UTF8 characters
  - [x] support colors and cursor movements
- - [ ] correctly working size propagation
+ - [x] correctly working size propagation
  - [ ] buffer size limit setting
  - [ ] color customization
  - [x] AI menu: ask assistant about selected terminal content

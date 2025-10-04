@@ -365,34 +365,16 @@ impl UI {
             }});"#,
             webview.call_native( move |args| {
 
-                if let Some(arg) = args.get(0) {
-                    if arg.contains(',') {
-                        let a = arg.find(',').unwrap();
-                        if let Some(cols) = arg.get(..a) {
-                            if let Some(rows) = arg.get(a+1..) {
-                                if let Ok(c) = cols.parse::<u16>() {
-                                    if let Ok(r) = rows.parse::<u16>() {
-                                        eprintln!("RESIZE: {}x{}",c,r);
-                                        unsafe{CURRENT_PTY.as_mut().unwrap()}.set_size(c,r);
-                                    }
-                                }
-                            }
-
-                        }
-                    }
-                }
-
-                // TODO: fix HUI rs arguments (the following code is okay, previous is temporary fix)
-                /*if let Some(cols) = args.get(0) {
+                if let Some(cols) = args.get(0) {
                     if let Some(rows) = args.get(1) {
                         if let Ok(c) = cols.parse::<u16>() {
                             if let Ok(r) = rows.parse::<u16>() {
                                 eprintln!("RESIZE: {}x{}",c,r);
-                                unsafe{CURRENT_PTY.as_ref().unwrap()}.set_size(c,r);
+                                unsafe{CURRENT_PTY.as_mut().unwrap()}.set_size(r,c);
                             }
                         }
                     }
-                }*/
+                }
 
             }, None)
         ), Some(false));
