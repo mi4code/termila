@@ -727,42 +727,6 @@ impl BUFF<'_> {
 
 
         if self.current_escape.len() == 0 { // regular text
-
-			// TODO: handle line endings with set_cursor (currently works fine on windows, but not on linux)
-            if /*self.formated_text.get(self.cursor_position_index).unwrap().text.chars().nth(self.cursor_position_character-1).unwrap_or(' ') == '\r' ||*/ self.handle_cr_next_time { // carriage return
-
-                self.handle_cr_next_time = false;
-
-                if chr == '\n' || chr == '\x0b' || chr == '\x0c' {
-                    // do nothing, the character is useless
-                }
-
-                // else if true { self.set_cursor_cr(1,self.get_cursor_r()); }
-
-                else { // move the cursor
-
-                    if self.formated_text.get(self.cursor_position_index).unwrap().text.contains('\n') { // newline in current text style chunk
-
-                        self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.rfind('\n').unwrap()+1;
-
-                    }
-
-                    else { // newline not in current text style chunk
-
-                        self.cursor_position_character = 0; // default position when there is no \n
-
-                        while self.cursor_position_index > 0 {
-                            self.cursor_position_index = self.cursor_position_index - 1;
-                            if self.formated_text.get(self.cursor_position_index).unwrap().text.contains('\n') {
-                                self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.rfind('\n').unwrap()+1;
-                                break;
-                            }
-                        }
-
-                    }
-
-                }
-            }
 			
             if chr == '\x00' { // null
                 // just dont display it
@@ -797,26 +761,18 @@ impl BUFF<'_> {
             }
             else if chr == '\n' || chr == '\x0b' || chr == '\x0c' { // newline \n \v \f
 			
-				// TODO: handle line endings with set_cursor (currently works fine on windows, but not on linux)
-			
-				/* let mut r = self.get_cursor_r();
+				let mut r = self.get_cursor_r();
 				if r == 0 {
 					self.set_cursor_cr(99999,0);
-					r+=1;
 					self.write_buff('\n');
 				}
-				self.set_cursor_cr(1,r-1); */
-			
-                if self.get_cursor_r() > 1 {self.set_cursor_cr(1/*self.get_cursor_c()*/,self.get_cursor_r()-1);}
-                else {self.write_buff('\n');}
+				else {
+					self.set_cursor_cr(1,r-1);
+				}
 				
             }
             else if chr == '\r' { // carriage return
-			
-				// TODO: handle line endings with set_cursor (currently works fine on windows, but not on linux)
-				// self.set_cursor_cr(1,self.get_cursor_r());
-				self.handle_cr_next_time = true;
-
+				self.set_cursor_cr(1,self.get_cursor_r());
             }
             else if chr == '\x1b' { // escape chracter
                 self.current_escape.push('\x1b'); // start escape sequence
@@ -835,7 +791,7 @@ impl BUFF<'_> {
 			
 			
 			
-			// list of all comon sequences here: https://xtermjs.org/docs/api/vtfeatures/
+			// list of all common sequences here: https://xtermjs.org/docs/api/vtfeatures/
 			
 			
 			// OSC sequences
@@ -1342,11 +1298,18 @@ impl BUFF<'_> {
     fn set_cursor(&mut self, mut index: usize, mut character: usize) {
 		// this function expects index to be < .len() and that character to be .is_char_boundary() && < .len()
 		// is and should be used only by set_cursor_cr
+		
+		// store current style to avoid accidentaly changing it by insert
+		let current_style = self.formated_text.get(self.cursor_position_index).unwrap().style.clone();
+		
+		// fix cases when current cursor is at blank/deleted segment
+		self.iter_next(&mut index, &mut character);
+		self.iter_prev(&mut index, &mut character);
 
         // insert first part to index+1
         self.formated_text.insert(index+1, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(..character).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true,id:0});
         // insert new patr to index+2
-        self.formated_text.insert(index+2, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index).unwrap().style.clone(),updated:true,id:0});
+        self.formated_text.insert(index+2, BUFF_formated_text{text:"".to_string(),style:current_style,updated:true,id:0});
         // insert second part to index+3
         self.formated_text.insert(index+3, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(character..).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true,id:0});
         // remove part at index
@@ -1556,7 +1519,9 @@ impl BUFF<'_> {
 					self.formated_text.get_mut(i).unwrap().updated = false;
 				}
 				
-				else if self.formated_text.get(i).unwrap().text == "" { // delete element
+				else if self.formated_text.get(i).unwrap().text == "" && self.cursor_position_index != i { // delete element
+					// we need to avoid removing chunk at cursor position in order to preserve current color - thus just process it as edit (in case it previously contained something), this way we loose the chance to remove all possible empty chunks
+					
 					webview.call_js( 
 						&format!(
 							"(function(){{ document.querySelector('body p#console span#t-{}').remove(); }})()",
@@ -1564,18 +1529,7 @@ impl BUFF<'_> {
 						), 
 						Some(false) 
 					);
-					if self.cursor_position_index == i { 
-						if i != 0 {
-							self.cursor_position_index -= 1;
-							self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.len();
-						}
-						else {
-							self.cursor_position_index = 0;
-							self.cursor_position_character = 0;
-						}
-						 
-					}
-					else if self.cursor_position_index > i {
+					if self.cursor_position_index > i {
 						self.cursor_position_index -= 1;
 					}
 					self.formated_text.remove(i); // should be safe to do since we iterate from the end
