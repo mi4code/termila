@@ -38,10 +38,20 @@ use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows::Win32::System::Threading::{CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, PROCESS_INFORMATION, STARTUPINFOEXW, EXTENDED_STARTUPINFO_PRESENT, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, GetExitCodeProcess};
 
 
+// supress output in release builds
+macro_rules! eprintln {
+    ($($rest:tt)*) => {
+        #[cfg(debug_assertions)]
+        std::eprintln!($($rest)*)
+    }
+}
+
+
 struct OPTIONS {
     shell: String, // your shell or any other command (with or without arguments but no bash operators; if you want bash to create console pauser or pipes or whatever, just use sh -c)
 	shell_args: Vec<String>,  // arguments for the shell (if loaded from the config file, args are part of the shell, so just parse them out)
     term: String, // terminal type to be advertised by termila to the shell (possible values: dumb, vt100, xterm, xterm-265color); linux-only
+	max_buff_size: usize,
     /*
 	ai_url: String, // url of OpenAI API server
     ai_key: String, // OpenAI API key
@@ -81,6 +91,9 @@ impl OPTIONS {
 		
 		let term = std::env::var("TERM").unwrap_or_else(|_| "xterm".to_string());
 		
+		// max_buff_size
+		let max_buff_size = usize::MAX;
+		
 		
 		// saved_commands_file, history_file
 		
@@ -93,7 +106,7 @@ impl OPTIONS {
 		{ history_file = "".to_string(); } // windows cmd.exe doesnt store history
 
 
-		return Self {shell, shell_args, term, saved_commands_file, history_file, };
+		return Self {shell, shell_args, term, max_buff_size, saved_commands_file, history_file, };
 	}
 }
 
@@ -410,27 +423,7 @@ impl UI {
 		// warning: js inside <script> or onload="" will not get executed 
 	}
 	
-	
-    fn update (&mut self, formated_text: &/*mut*/ Vec<BUFF_formated_text>) {
 
-        // create html
-        let mut html = String::new();
-        for i in formated_text {
-            html.push_str( &format!("<span style=\"{}\">{}</span>", i.style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" "), i.text.replace(" ", "&nbsp;").replace("\\","\\\\").replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")) );
-        }
-
-        // update whole terminal content
-        let js_command = format!("document.querySelector('body p').innerHTML=`{}`;", html.replace("`","\\`"));
-        self.webview.call_js(&js_command, Some(false));
-
-        // TODO: clear blanks here to sync with html dom, apply clear sequences (segments should have an id paired with dom id, if it gets updated to blank both get deleted here) -- part of partial updates, which it will be possible to implement as soon as the writing/positioning is reliable enough
-
-        // autoscroll
-        self.webview.call_js("if (document.querySelector('#menu button#autoscroll').dataset.checked!='true') {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
-		// TODO: better scrolling (hide initial free lines + scroll to current cursor position)
-
-    }
-	
 	fn popup_ai (&self) {
 		self.add_popup(
 			"ai",
@@ -547,6 +540,23 @@ impl UI {
 	// TODO: custom popup_* -> plugin interface = just shared object with one function `void termila_custom_popup_init(void* webview, function add_popup);`
 	
 	
+	fn escape_text (text: &String) -> String {
+		let mut result = String::with_capacity(text.len());
+		for c in text.chars() {
+			match c {
+				' '  => result.push_str("&nbsp;"),
+				'\\' => result.push_str("\\\\"),
+				'<'  => result.push_str("&lt;"),
+				'>'  => result.push_str("&gt;"),
+				'\n' => result.push_str("<br>"),
+				'`'  => result.push_str("\\`"),
+				_    => result.push(c),
+			}
+		}
+		return result;
+	}
+
+	
 	fn debug_pty_read(&mut self) -> char {
 		
 		self.webview.call_js("document.querySelector('div#dbg').style.display='';", Some(false));
@@ -633,27 +643,33 @@ impl UI {
 
 
 struct BUFF_formated_text<'l> {
-    text: String,
-    style: HashMap<&'l str, &'l str>, // TODO: use String instead of str to avoid lifetimes and leaks
-    updated: bool,
+    text: String, // console text
+    style: HashMap<&'l str, &'l str>, // css attributes
+    updated: bool, // changet but not displayed
+    id: usize, // html id, 0 means unset, set when update runs, '#t-<value>'
 }
-
 struct BUFF<'a> {
     formated_text: Vec<BUFF_formated_text<'a>>, // html_vec [ [<html>,<css or classn>,<q updated>], ] // TODO: ensure that blanks are not preserved
+    formated_text_last_id: usize,
+    formated_text_changes: usize,
+	
     current_escape: String, // multi-character special commands; contains the sequence from the escape byte to the last character read; if we are not currently reading any sequence (after previous was finished) it is empty string
-    current_escape_max_length: usize, // this is to avoid breaking terminal with unsupported/malicious sequences; the value depends on different sequence type
-    cursor_position_index: usize,
+    current_escape_max_length: usize, // this is to avoid breaking terminal with unsupported/malicious sequences; the value depends on sequence type
+    
+	cursor_position_index: usize,
     cursor_position_character: usize,
-    handle_cr_next_time: bool,
+	
+    handle_cr_next_time: bool, // TODO: remove
 }
-
 impl BUFF<'_> {
 	
     fn new() -> Option<Self> {
         unsafe {
             Some(Self {
-                formated_text: vec![BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:false}, /*BUFF_formated_text{text:"_".to_string(),style:"font-style: bold;".to_string(),updated:false}*/],
-                current_escape: "".to_string(),
+                formated_text: vec![/*BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:false,id:0},*/],
+                formated_text_last_id: 0,
+				formated_text_changes: 0,
+				current_escape: "".to_string(),
                 current_escape_max_length: 0,
                 cursor_position_index: 0,
                 cursor_position_character: 0,
@@ -663,20 +679,21 @@ impl BUFF<'_> {
     }
 
     
-
-	fn write_buff(&mut self, chr: char) { // write
+	fn write_buff(&mut self, chr: char) {
 
 		// fix invalid cursor position
-        if self.cursor_position_index > self.formated_text.len(){
-            eprintln!("INVALID POSITION IN BUFFER - RESETING");
+        if self.cursor_position_index >= self.formated_text.len(){
+            eprintln!("BUFF: (warning) invalid position in buffer - reseting");
             self.cursor_position_index = self.formated_text.len();
             self.cursor_position_character = 0;
-            self.formated_text.push( BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true} );
+            self.formated_text.push( BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true,id:0} );
+			self.formated_text_changes += 1;
         }
         if self.cursor_position_character > self.formated_text.get(self.cursor_position_index).unwrap().text.len() {
-            eprintln!("INVALID POSITION IN BUFFER - RESETING");
+            eprintln!("BUFF: (warning) invalid position in buffer - reseting");
             self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.len();
         }
+		
 		
         // remove character at cursor position if overwriting and if its not newline
         let mut index = self.cursor_position_index;
@@ -685,7 +702,7 @@ impl BUFF<'_> {
 			self.iter_next(& mut index,& mut character);
 		}
 		
-        if /* !self.cursor_position.insert && */ self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") != "\n" {
+        if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") != "\n" {
 
             let mut start = character/*+1*/;
             let mut end = character+1/*+1*/;
@@ -699,6 +716,11 @@ impl BUFF<'_> {
             if end > self.formated_text.get(index).unwrap().text.len() { end = self.formated_text.get(index).unwrap().text.len(); }
 
             self.formated_text.get_mut(index).unwrap().text.replace_range(start..end, "");
+			
+			if !self.formated_text.get(index).unwrap().updated {
+				self.formated_text.get_mut(index).unwrap().updated = true;
+				self.formated_text_changes += 1;
+			}
 
         }
 		
@@ -709,16 +731,17 @@ impl BUFF<'_> {
             pos-=1;
         }
         self.formated_text.get_mut(self.cursor_position_index).unwrap().text.insert(pos, chr);
+		if !self.formated_text.get(self.cursor_position_index).unwrap().updated {
+			self.formated_text.get_mut(self.cursor_position_index).unwrap().updated = true;
+			self.formated_text_changes += 1;
+		}
         self.cursor_position_character += chr.len_utf8();
 		
     }
 
-
-
     fn write_raw(&mut self, mut chr: char) {
 
 		if chr == '\x00' {return;} // never accept '\0' for processing - pty implementation returns it when there are no new bytes (it isnt shown anyway and even escape sequences wont contain it)
-        //if !chr.is_ascii() {chr='#';} // TODO: accept char (utf8/16/32) or construct it
 
 
         if self.current_escape.len() == 0 { // regular text
@@ -875,29 +898,8 @@ impl BUFF<'_> {
 				
 				self.current_escape_max_length = 16;
 				
-				/*// sequence already ended, testing if there is continuation jammed to it
-				if self.current_escape.starts_with("\x1b[") && self.current_escape.contains("\x00") {
-					
-					if self.current_escape.ends_with("\x00[") { // yes
-					
-						// make it look like new sequence
-						self.current_escape = "\x1b[".to_string();
-						
-					}
-					else { // no
-					
-						// end sequence
-						self.current_escape = "".to_string();
-						
-						// process current character the correct way
-						self.write_raw(by);
-						
-					}
-					
-				}*/
-				
 				// ending sequence
-				/*else*/ if (0x40..=0x7E).contains(self.current_escape.as_bytes().last().unwrap()) && self.current_escape.len() > 2 {
+				if (0x40..=0x7E).contains(self.current_escape.as_bytes().last().unwrap()) && self.current_escape.len() > 2 {
 					
 					// remove starting bytes (always two)
 					let final_escape = &self.current_escape[2..];
@@ -1059,14 +1061,27 @@ impl BUFF<'_> {
 						// if there is empty style field at current cursor position, update its css 
 						if self.cursor_position_index < self.formated_text.len() && self.formated_text.get(self.cursor_position_index).unwrap().text.len() == 0 {
 							self.formated_text.get_mut(self.cursor_position_index).unwrap().style.extend(css);
-							self.formated_text.get_mut(self.cursor_position_index).unwrap().updated = true;
+							if !self.formated_text.get(self.cursor_position_index).unwrap().updated {
+								self.formated_text.get_mut(self.cursor_position_index).unwrap().updated = true;
+								self.formated_text_changes += 1;
+							}
 						}
 						// create new style field and switch to it
 						else {
-							self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index).unwrap().style.clone(),updated:true});
-							self.cursor_position_index += 1;
-							self.cursor_position_character = 0;
+							if self.cursor_position_index < self.formated_text.len() { // expected
+								self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index).unwrap().style.clone(),updated:true,id:0});
+								self.cursor_position_index += 1;
+								self.cursor_position_character = 0;
+							}
+							else { // handle situation when cursor position is wrong = len() is 0 (this is result of partial updates removing all segments - even the first one)
+								self.formated_text.push(BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true,id:0});
+								self.cursor_position_index = self.formated_text.len()-1;
+								self.cursor_position_character = 0;
+								eprintln!("BUFF: (warning) invalid position in buffer - reseting");
+							}
+
 							self.formated_text.get_mut(self.cursor_position_index).unwrap().style.extend(css);
+							self.formated_text_changes += 1;
 						}
 
 					}
@@ -1093,21 +1108,45 @@ impl BUFF<'_> {
 						// self.current_escape == "\x1b[0J" || self.current_escape == "\x1b[1J" || self.current_escape == "\x1b[2J" || self.current_escape == "\x1b[3J"
 						
 						if final_escape.ends_with("2J") || final_escape.ends_with("3J") { // entire screen
-							// TODO: there are actually some differences between these 
-							// TODO: this would definitely break partial updates
-							self.formated_text = vec![BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true},];
+							// TODO: there are actually some differences between these two
+							for i in (0..self.formated_text.len()) {
+								self.formated_text.get_mut(i).unwrap().text = "".to_string();
+								if !self.formated_text.get_mut(i).unwrap().updated {
+									self.formated_text.get_mut(i).unwrap().updated = true;
+									self.formated_text_changes += 1;
+								}
+							}
 							self.cursor_position_index = 0;
 							self.cursor_position_character = 0;
 						}
 						else if final_escape.ends_with("1J") { // from beginning to cursor
-							self.formated_text.drain(..self.cursor_position_index);
-							self.cursor_position_index = 0;
+							for i in (0..self.cursor_position_index) {
+								self.formated_text.get_mut(i).unwrap().text = "".to_string();
+								if !self.formated_text.get_mut(i).unwrap().updated {
+									self.formated_text.get_mut(i).unwrap().updated = true;
+									self.formated_text_changes += 1;
+								}
+							}
 							self.formated_text.get_mut(self.cursor_position_index).unwrap().text.drain(..self.cursor_position_character);
+							if !self.formated_text.get_mut(self.cursor_position_index).unwrap().updated {
+								self.formated_text.get_mut(self.cursor_position_index).unwrap().updated = true;
+								self.formated_text_changes += 1;
+							}
 							self.cursor_position_character = 0;
 						}
 						else /*final_escape.ends_with("0J") || final_escape.ends_with("J")*/ { // from end to cursor 
-							self.formated_text.truncate(self.cursor_position_index+1);
+							for i in (self.cursor_position_index+1..self.formated_text.len()) {
+								self.formated_text.get_mut(i).unwrap().text = "".to_string();
+								if !self.formated_text.get_mut(i).unwrap().updated {
+									self.formated_text.get_mut(i).unwrap().updated = true;
+									self.formated_text_changes += 1;
+								}
+							}
 							self.formated_text.get_mut(self.cursor_position_index).unwrap().text.truncate(self.cursor_position_character+1);
+							if !self.formated_text.get_mut(self.cursor_position_index).unwrap().updated {
+								self.formated_text.get_mut(self.cursor_position_index).unwrap().updated = true;
+								self.formated_text_changes += 1;
+							}
 						}
 
 					}
@@ -1241,13 +1280,6 @@ impl BUFF<'_> {
     }
 
 
-
-	fn dom_mut(&mut self) -> &/*mut*/ Vec<BUFF_formated_text> {
-        &mut self.formated_text
-    }
-
-
-
 	fn iter_next (&self, index: &mut usize, character: &mut usize) -> bool {
 		let this = &self.formated_text;
 		
@@ -1330,16 +1362,22 @@ impl BUFF<'_> {
 		// is and should be used only by set_cursor_cr
 
         // insert first part to index+1
-        self.formated_text.insert(index+1, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(..character).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true});
+        self.formated_text.insert(index+1, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(..character).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true,id:0});
         // insert new patr to index+2
-        self.formated_text.insert(index+2, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index).unwrap().style.clone(),updated:true});
+        self.formated_text.insert(index+2, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index).unwrap().style.clone(),updated:true,id:0});
         // insert second part to index+3
-            self.formated_text.insert(index+3, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(character..).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true});
+        self.formated_text.insert(index+3, BUFF_formated_text{text:self.formated_text.get(index).unwrap().text.get(character..).unwrap_or("<TERMILA_PARSER_ERROR>").to_string(),style:self.formated_text.get(index).unwrap().style.clone(),updated:true,id:0});
         // remove part at index
-        self.formated_text.remove(index);
+		self.formated_text.get_mut(index).unwrap().text = "".to_string();
+		if !self.formated_text.get_mut(index).unwrap().updated {
+			self.formated_text.get_mut(index).unwrap().updated = true;
+			self.formated_text_changes += 1;
+		}
 
-        self.cursor_position_index = index+1;
+        self.cursor_position_index = index+2;
         self.cursor_position_character = 0;
+		
+		self.formated_text_changes += 3;
 
     }
 
@@ -1459,13 +1497,16 @@ impl BUFF<'_> {
 		
 		
 		// add spaces to reach desired column outside existing text
-		self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true}); // use neutral color
+		self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true,id:0}); // use neutral color
+		self.formated_text_changes += 1;
 		self.cursor_position_index += 1;
 		self.cursor_position_character = 0;
 		for _ in 0..column { self.write_buff(' '); } // add spaces without style
-		self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index-1).unwrap().style.clone(),updated:true}); // restore previous color
+		self.formated_text.insert(self.cursor_position_index+1, BUFF_formated_text{text:"".to_string(),style:self.formated_text.get(self.cursor_position_index-1).unwrap().style.clone(),updated:true,id:0}); // restore previous color
+		self.formated_text_changes += 1;
 		self.cursor_position_index += 1;
 		self.cursor_position_character = 0;
+		
 
 
 		// print debug statistics
@@ -1473,6 +1514,122 @@ impl BUFF<'_> {
 
     }
 
+
+    fn update_full (&mut self, webview: &HUI::WebView) { // full terminal update (slow)
+	
+		if self.formated_text_changes == 0 { return; }  // nothing to update
+
+        // create html
+        let mut html = String::new();
+        for i in &self.formated_text {
+            html.push_str( &format!("<span style=\"{}\">{}</span>", i.style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" "), UI::escape_text(&i.text)) );
+        }
+
+        // update whole terminal content
+        let js_command = format!("document.querySelector('body p').innerHTML=`{}`;", html.replace("`","\\`"));
+        webview.call_js(&js_command, Some(false));
+
+        // TODO: clear blanks here to sync with html dom, apply clear sequences (segments should have an id paired with dom id, if it gets updated to blank both get deleted here) -- part of partial updates, which it will be possible to implement as soon as the writing/positioning is reliable enough
+
+        // autoscroll
+        webview.call_js("if (document.querySelector('#menu button#autoscroll').dataset.checked!='true') {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
+		// TODO: better scrolling (hide initial free lines + scroll to current cursor position)
+		
+		self.formated_text_changes = 0; // everything is updated now 
+
+    }
+
+    fn update_partial (&mut self, webview: &HUI::WebView) { // partial terminal update (little faster)
+	
+		if self.formated_text_changes == 0 { return; }  // nothing to update
+		
+		// clear old scrollback to save memory
+		
+		// TODO: issue - know size without iterating whole terminal or guess it
+		//unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.max_buff_size
+		
+		
+		// perform update
+		for i in (0..self.formated_text.len()).rev() {
+			
+			if self.formated_text_changes == 0 { break; }  // everything was already updated
+			
+			if self.formated_text.get(i).unwrap().updated {
+				
+				if self.formated_text.get(i).unwrap().id == 0 { // add element
+					self.formated_text_last_id += 1;
+					self.formated_text.get_mut(i).unwrap().id = self.formated_text_last_id;
+					
+					webview.call_js( 
+						&format!(
+							"(function(){{ let e = document.createElement('span'); e.id = 't-{}'; e.innerHTML=`{}`; e.style.cssText = `{}`; {} }})()",
+							self.formated_text.get(i).unwrap().id,
+							UI::escape_text(&self.formated_text.get(i).unwrap().text),
+							self.formated_text.get(i).unwrap().style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" "),
+							if self.formated_text.get(i+1).unwrap_or(&BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:false,id:0}).id != 0 {format!("document.querySelector('body p#console span#t-{}').before(e);", self.formated_text.get(i+1).unwrap().id)} else {"document.querySelector('body p#console').appendChild(e);".to_string()}
+						), 
+						Some(false) 
+					);
+					
+					self.formated_text.get_mut(i).unwrap().updated = false;
+				}
+				
+				else if self.formated_text.get(i).unwrap().text == "" { // delete element
+					webview.call_js( 
+						&format!(
+							"(function(){{ document.querySelector('body p#console span#t-{}').remove(); }})()",
+							self.formated_text.get(i).unwrap().id,
+						), 
+						Some(false) 
+					);
+					if self.cursor_position_index == i { 
+						if i != 0 {
+							self.cursor_position_index -= 1;
+							self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.len();
+						}
+						else {
+							self.cursor_position_index = 0;
+							self.cursor_position_character = 0;
+						}
+						 
+					}
+					else if self.cursor_position_index > i {
+						self.cursor_position_index -= 1;
+					}
+					self.formated_text.remove(i); // should be safe to do since we iterate from the end
+				}
+				
+				else { // edit element
+					webview.call_js( 
+						&format!(
+							"(function(){{ let e = document.querySelector('body p#console span#t-{}'); e.innerHTML=`{}`; e.style.cssText = `{}`; }})()",
+							self.formated_text.get(i).unwrap().id,
+							UI::escape_text(&self.formated_text.get(i).unwrap().text),
+							self.formated_text.get(i).unwrap().style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" ")
+						), 
+						Some(false) 
+					);
+					
+					self.formated_text.get_mut(i).unwrap().updated = false;
+				}
+				
+				self.formated_text_changes-=1;
+			}
+			
+		}
+		
+		if self.formated_text_changes > 0 { 
+			eprintln!("BUFF: (warning) changes updated don't match changes made"); 
+			#[cfg(not(debug_assertions))] 	
+			{ self.formated_text_changes = 0; }
+		}
+		
+		
+        // autoscroll
+        webview.call_js("if (document.querySelector('#menu button#autoscroll').dataset.checked!='true') {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
+		// TODO: better scrolling (hide initial free lines + scroll to current cursor position)
+		
+    }
 
 	/*
 	positioning specs:
@@ -1953,9 +2110,6 @@ fn main() {
     let mut to_update = 0; // keep count of bytes that were outputed to the terminal but were not yet shown in the ui
 
     loop {
-		
-		// TODO: split stdin/stderr/stdout - actually this may exist only in the pty part, buff we will have arg, not separatte method = step one is to put in/err together in main -- best will be to glue stdout/err together in main and we can optionaly send escape sequences between them (for colors or custom ones for detection and styling)
-
 
         //let buf = unsafe{CURRENT_PTY.as_mut().unwrap()}.read(); // make the terminal read
 		//let chr = buf as char;
@@ -1970,7 +2124,8 @@ fn main() {
         if to_update >= 1024 || (chr == '\0' && to_update != 0) { // if there are no new bytes comming show them, if there are more than 1024 bytes pending for being shown show them too
             to_update = 0;
 
-            ui.update(buff.dom_mut());
+            //buff.update_full(&mut ui.webview);
+			buff.update_partial(&mut ui.webview);
         }
 
         else if chr != '\0' {
