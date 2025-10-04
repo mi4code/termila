@@ -39,11 +39,23 @@ use windows::Win32::System::Threading::{CreateProcessW, DeleteProcThreadAttribut
 
 
 // supress output in release builds
+// (all debug prints should go to stderr and be in format '(verbosity)  SOURCE: message')
 macro_rules! eprintln {
+	/*
     ($($rest:tt)*) => {
         #[cfg(debug_assertions)]
+		
         std::eprintln!($($rest)*)
     }
+	*/
+    ($fmt:expr $(, $args:expr)*) => {
+        #[cfg(debug_assertions)]
+        {
+            if !$fmt.starts_with("(info)") {
+                std::eprintln!($fmt $(, $args)*);
+            }
+        }
+    };
 }
 
 
@@ -141,7 +153,8 @@ impl UI {
 							// TODO: other non letter characters
 							
 							if (what.ctrlKey && what.keyCode >= 65 && what.keyCode <= 90) { // ctrl a..z
-								if (what.ctrlKey && what.keyCode >= 67 && window.getSelection().toString() != '') {return;} // allow ctrl c copy
+								if (what.ctrlKey && what.keyCode == 67 && window.getSelection().toString() != '') {return;} // allow ctrl c copy
+								if (what.ctrlKey && what.keyCode == 86) {return;} // allow ctrl v paste
 								term_type( what.keyCode-64 );
 								what.preventDefault();
 							}
@@ -220,7 +233,7 @@ impl UI {
 
 						// get data
 						var clipboardData = event.clipboardData || window.clipboardData;
-						term_type(clipboardData);
+						term_type(clipboardData.getData('Text'));
 						
 					});
 					
@@ -329,7 +342,6 @@ impl UI {
         let key_term_handle = webview.call_native( move |args| {
                 if let Some(arg) = args.get(0) {
                     if let Ok(val) = arg.parse::<u8>() {
-                        //unsafe{CURRENT_PTY.as_ref().unwrap()}.write(val);
 						unsafe{CURRENT_PTY.as_mut().unwrap()}.write(val);
                     }
                 }
@@ -340,8 +352,6 @@ impl UI {
         // automatically set terminal size
         webview.call_js(&format!(r#"
             window.addEventListener('resize', () => {{
-
-				console.log("jsresize");
 
                 const span = document.createElement('span');
                 span.textContent = 'M';
@@ -369,7 +379,7 @@ impl UI {
                     if let Some(rows) = args.get(1) {
                         if let Ok(c) = cols.parse::<u16>() {
                             if let Ok(r) = rows.parse::<u16>() {
-                                eprintln!("RESIZE: {}x{}",c,r);
+                                eprintln!("(info)  UI: resize {}x{}", c, r);
                                 unsafe{CURRENT_PTY.as_mut().unwrap()}.set_size(r,c);
                             }
                         }
@@ -399,7 +409,6 @@ impl UI {
 	
 	
 	fn add_popup(&self, id: &str, button: &str, body: &str, is_toast_not_popup: bool){
-		//self.webview.call_js( &format!( r#" document.querySelector('#menu').innerHTML += `<button id="{}" onclick="if(document.querySelector('#menu div#'+this.id).className=='toast'){{return;}} if (document.querySelector('#menu div#'+this.id).style.visibility=='visible'){{document.querySelector('#menu div#'+this.id).style.visibility='hidden';}} else{{document.querySelector('#menu div#'+this.id).style.visibility='visible';}}">{}</button> <div id="{}" class="{}">{}</div>`; "# , id, button, id, if is_toast_not_popup {"toast"} else {"popup"}, body) , Some(false));
 		self.webview.call_js( &format!( r#" document.querySelector('#menu').innerHTML += `<button id="{}" onclick="this.dataset.checked = (!(this.dataset.checked=='true')).toString()">{}</button> <div id="{}" class="{}">{}</div>`; "# , id, button, id, if is_toast_not_popup {"toast"} else {"popup"}, body) , Some(false));
 		// you can edit the element any time later using js
 		// warning: js inside <script> or onload="" will not get executed 
@@ -456,7 +465,7 @@ impl UI {
 			let mut html = "<p onclick=\"\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">".to_string();
 			for line0 in reader.lines() {
 				let line = line0.unwrap(); 
-				html.push_str(&line);
+				html.push_str(&UI::escape_text(&line));
 				html.push_str("<br>");
 				if line == "" {
 					html.push_str("</p><p onclick=\"term_type(this.innerText.split('\\\\n').filter(f => f != '').findLast(f=>true));\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">");
@@ -475,10 +484,10 @@ impl UI {
 				Ok(f) => f,
 				Err(_) => return "<p>HISTORY FILE NOT FOUND!</p>".to_string(),
 			};
-			let start = -(file.metadata().expect("REASON").len().saturating_sub(10240) as i64);
+			let start = -(file.metadata().expect("file metadata err").len().saturating_sub(10240) as i64);
 			let mut reader = BufReader::new(file);
 			reader.seek(SeekFrom::End(start)); // TODO: auto-load all previous (efficiently)
-			return reader.lines().map(|line| format!("<p onclick=\"term_type(this.innerHTML);\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">{}</p>", line.unwrap())).collect(); 
+			return reader.lines().map(|line| format!("<p onclick=\"term_type(this.innerHTML);\" tabindex=\"0\" style=\"border-radius: 3px; border: 2px solid var(--hui_style_theme_color); padding: 3px;\">{}</p>", &UI::escape_text(&line.unwrap()))).collect(); 
 		})();
 		self.add_popup("history", "HI", &body, false);
 	}
@@ -627,7 +636,7 @@ impl UI {
 struct BUFF_formated_text<'l> {
     text: String, // console text
     style: HashMap<&'l str, &'l str>, // css attributes
-    updated: bool, // changet but not displayed
+    updated: bool, // changed but not displayed
     id: usize, // html id, 0 means unset, set when update runs, '#t-<value>'
 }
 struct BUFF<'a> {
@@ -640,14 +649,12 @@ struct BUFF<'a> {
     
 	cursor_position_index: usize,
     cursor_position_character: usize,
-	
-    handle_cr_next_time: bool, // TODO: remove
 }
 impl BUFF<'_> {
 	
-    fn new() -> Option<Self> {
+    fn new() -> Self {
         unsafe {
-            Some(Self {
+            Self {
                 formated_text: vec![/*BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:false,id:0},*/],
                 formated_text_last_id: 0,
 				formated_text_changes: 0,
@@ -655,8 +662,7 @@ impl BUFF<'_> {
                 current_escape_max_length: 0,
                 cursor_position_index: 0,
                 cursor_position_character: 0,
-                handle_cr_next_time: false,
-            })
+            }
         }
     }
 
@@ -665,14 +671,14 @@ impl BUFF<'_> {
 
 		// fix invalid cursor position
         if self.cursor_position_index >= self.formated_text.len(){
-            eprintln!("BUFF: (warning) invalid position in buffer - reseting");
+            eprintln!("(warning)  BUFF: invalid position in buffer - reseting");
             self.cursor_position_index = self.formated_text.len();
             self.cursor_position_character = 0;
             self.formated_text.push( BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true,id:0} );
 			self.formated_text_changes += 1;
         }
         if self.cursor_position_character > self.formated_text.get(self.cursor_position_index).unwrap().text.len() {
-            eprintln!("BUFF: (warning) invalid position in buffer - reseting");
+            eprintln!("(warning)  BUFF: invalid position in buffer - reseting");
             self.cursor_position_character = self.formated_text.get(self.cursor_position_index).unwrap().text.len();
         }
 		
@@ -732,7 +738,7 @@ impl BUFF<'_> {
                 // just dont display it
             }
             else if chr == '\x07' { // bell
-                eprintln!("BELL !!!");
+                eprintln!("(info)  BUFF: bell !!!");
                 // TODO: audio
             }
             else if chr == '\x08' { // backspace
@@ -1015,7 +1021,7 @@ impl BUFF<'_> {
 								self.formated_text.push(BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:true,id:0});
 								self.cursor_position_index = self.formated_text.len()-1;
 								self.cursor_position_character = 0;
-								eprintln!("BUFF: (warning) invalid position in buffer - reseting");
+								eprintln!("(warning)  BUFF: invalid position in buffer - reseting");
 							}
 
 							self.formated_text.get_mut(self.cursor_position_index).unwrap().style.extend(css);
@@ -1197,10 +1203,9 @@ impl BUFF<'_> {
 			} 
 			
 
-
             // enforce max length
             if self.current_escape.len() >= self.current_escape_max_length {
-                eprintln!("UNKNOWN ESCAPE SEQUENCE: '{}'", self.current_escape);
+                eprintln!("(warning)  BUFF: unknown escape sequence '{}'", self.current_escape);
 
                 // print it to terminal
                 let escape = self.current_escape.get(1..).unwrap().to_owned();
@@ -1213,7 +1218,6 @@ impl BUFF<'_> {
             }
 
         }
-
 
     }
 
@@ -1373,9 +1377,13 @@ impl BUFF<'_> {
     fn set_cursor_cr(&mut self, mut column: usize, mut row: usize) {
 		
 		// store debug statistics
+		#[cfg(debug_assertions)]
         let old_col = self.get_cursor_c();
+		#[cfg(debug_assertions)]
         let old_row = self.get_cursor_r();
+		#[cfg(debug_assertions)]
         let des_col = column;
+		#[cfg(debug_assertions)]
         let des_row = row;
 
 
@@ -1455,7 +1463,13 @@ impl BUFF<'_> {
 
 
 		// print debug statistics
-        eprintln!("SET CURSOR POSITION (c{},r{}) -> (c{},r{}) -> (c{},r{}) = old->desired->final", old_col,old_row, des_col,des_row, self.get_cursor_c(),self.get_cursor_r() );
+		#[cfg(debug_assertions)]
+		{
+		let fin_col = self.get_cursor_c();
+		let fin_row = self.get_cursor_r();
+		if fin_col != des_col || fin_row != des_row { eprintln!("(error)  BUFF: set cursor position (c{},r{}) -> (c{},r{}) -> (c{},r{}) = old->desired->final", old_col,old_row, des_col,des_row, fin_col,fin_row ); }
+        else { eprintln!("(info)  BUFF: set cursor position (c{},r{}) -> (c{},r{}) -> (c{},r{}) = old->desired->final", old_col,old_row, des_col,des_row, fin_col,fin_row ); }
+		}
 
     }
 
@@ -1474,11 +1488,10 @@ impl BUFF<'_> {
         let js_command = format!("document.querySelector('body p').innerHTML=`{}`;", html.replace("`","\\`"));
         webview.call_js(&js_command, Some(false));
 
-        // TODO: clear blanks here to sync with html dom, apply clear sequences (segments should have an id paired with dom id, if it gets updated to blank both get deleted here) -- part of partial updates, which it will be possible to implement as soon as the writing/positioning is reliable enough
+        // TODO: clear blanks here
 
         // autoscroll
         webview.call_js("if (document.querySelector('#menu button#autoscroll').dataset.checked!='true') {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
-		// TODO: better scrolling (hide initial free lines + scroll to current cursor position)
 		
 		self.formated_text_changes = 0; // everything is updated now 
 
@@ -1491,7 +1504,7 @@ impl BUFF<'_> {
 		// clear old scrollback to save memory
 		
 		// TODO: issue - know size without iterating whole terminal or guess it
-		//unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.max_buff_size
+		//unsafe{CURRENT_OPTIONS.as_ref().unwrap()}.max_buff_size
 		
 		
 		// perform update
@@ -1555,7 +1568,7 @@ impl BUFF<'_> {
 		}
 		
 		if self.formated_text_changes > 0 { 
-			eprintln!("BUFF: (warning) changes updated don't match changes made"); 
+			eprintln!("(warning)  BUFF: changes updated don't match changes made"); 
 			#[cfg(not(debug_assertions))] 	
 			{ self.formated_text_changes = 0; }
 		}
@@ -1563,7 +1576,6 @@ impl BUFF<'_> {
 		
         // autoscroll
         webview.call_js("if (document.querySelector('#menu button#autoscroll').dataset.checked!='true') {window.scrollTo(0, document.body.scrollHeight);}", Some(false));
-		// TODO: better scrolling (hide initial free lines + scroll to current cursor position)
 		
     }
 
@@ -1605,34 +1617,34 @@ impl PTY {
 
             // needs to be called so slave can be opened
             if master == -1 {
-                eprintln!("ERROR: posix_openpt()");
+                eprintln!("(error)  PTY: posix_openpt()");
                 return None;
             }
             if grantpt(master) == -1 {
-                eprintln!("ERROR: grantpt()");
+                eprintln!("(error)  PTY: grantpt()");
                 return None;
             }
             if unlockpt(master) == -1 {
-                eprintln!("ERROR: unlockpt()");
+                eprintln!("(error)  PTY: unlockpt()");
                 return None;
             }
 
             // get slave's file descriptor (for our shell subprocess)
             let slave_name = ptsname(master);
             if slave_name == std::ptr::null_mut() {
-                eprintln!("ERROR: ptsname()");
+                eprintln!("(error)  PTY: ptsname()");
                 return None;
             }
             let slave_fd = open(slave_name, O_RDWR | O_NOCTTY);
             if slave_fd == -1 {
-                eprintln!("ERROR: open()");
+                eprintln!("(error)  PTY: open()");
                 return None;
             }
 
             // launch
             let pid = fork();
             if pid < 0 {
-                eprintln!("ERROR: fork()");
+                eprintln!("(error)  PTY: fork()");
                 return None;
             }
             if pid == 0 {
@@ -1641,7 +1653,7 @@ impl PTY {
                 // create a new session and make it controlling terminal for this process
                 setsid();
                 if ioctl(slave_fd, TIOCSCTTY, 0) == -1 {
-                    eprintln!("ERROR: ioctl(TIOCSCTTY)");
+                    eprintln!("(error)  PTY: ioctl(TIOCSCTTY)");
                     return None;
                 }
 
@@ -1678,7 +1690,7 @@ impl PTY {
         unsafe {
             // this is the very same ioctl that normal programs use to query the window size (so in theory normal programs can also set the size)
             if ioctl(self.master, TIOCSWINSZ, &ws as *const _ as *const _) >= 0 {
-                eprintln!("ERROR: ioctl(TIOCSWINSZ)");
+                eprintln!("(error)  PTY: ioctl(TIOCSWINSZ)");
                 return false;
             }
             return true;
@@ -1703,25 +1715,25 @@ impl PTY {
         let mut timeout = timeval { tv_sec: 0, tv_usec: 0 };
         let ready = unsafe { select(self.master + 1, &mut readfds, ptr::null_mut(), ptr::null_mut(), &mut timeout) };
         if ready < 0 {
-            eprintln!("ERROR: select()");
+            eprintln!("(error)  PTY: select()");
         }
 
         if unsafe { FD_ISSET(self.master, &readfds) } {
             let mut buf = [0u8; 1];
             let n = unsafe { read(self.master, buf.as_mut_ptr() as *mut _, 1) };
             if n <= 0 {
-                eprintln!("EXIT: nothing to read or error");
-                std::process::exit(1);
+                eprintln!("(info)  PTY: nothing to read or error");
+                std::process::exit(0);
                 //return 255; // unused by utf8, here means exit
             }
 
-            eprintln!("TERMINAL: '{}' {}", buf[0] as char, buf[0]);
+            eprintln!("(info)  PTY: read '{}' {}", if ((32..128).contains(&buf[0])) {format!("{}", buf[0] as char)} else {format!("\\x{:02x}", buf[0])}, buf[0]);
             return buf[0];
 
         }
 
         // there are no new bytes (better would be to run this in other thread and wait for new bytes - pass nullptr instead of timeout to select)
-        // eprintln!("ERROR: terminal read"); // avoid spaming console
+        //eprintln!("(info)  PTY: nothing to read"); // avoid spaming console
         return 0;
     }
 
@@ -1762,11 +1774,11 @@ impl PTY {
 
             // create pipes
             if CreatePipe(&mut in_read, &mut in_write, None/*Some(&mut sa)*/, 0).is_err() {
-                eprintln!("ERROR: CreatePipe(in)");
+                eprintln!("(error)  PTY: CreatePipe(in)");
                 return None;
             }
             if CreatePipe(&mut out_read, &mut out_write, None/*Some(&mut sa)*/, 0).is_err() {
-                eprintln!("ERROR: CreatePipe(out)");
+                eprintln!("(error)  PTY: CreatePipe(out)");
                 return None;
             }
 			
@@ -1779,7 +1791,7 @@ impl PTY {
 			let hpc = match unsafe { CreatePseudoConsole(size, in_read, out_write, 0) } {
 				Ok(h) => h,
 				Err(err) => {
-					eprintln!("ERROR: CreatePseudoConsole() - {:?}", err);
+					eprintln!("(error)  PTY: CreatePseudoConsole() - {:?}", err);
 					return None;
 				}
 			};
@@ -1807,11 +1819,11 @@ impl PTY {
 			);
 			
             if si_ex.lpAttributeList.0.is_null() {
-                eprintln!("ERROR: HeapAlloc(attrlist)");
+                eprintln!("(error)  PTY: HeapAlloc(attrlist)");
                 return None;
             }
             if InitializeProcThreadAttributeList(si_ex.lpAttributeList, 1, 0, &mut bytes).is_err() {
-                eprintln!("ERROR: InitializeProcThreadAttributeList()");
+                eprintln!("(error)  PTY: InitializeProcThreadAttributeList()");
                 return None;
             }
 
@@ -1825,7 +1837,7 @@ impl PTY {
                 None,
                 None,
             ).is_err() {
-                eprintln!("ERROR: UpdateProcThreadAttribute(PSEUDOCONSOLE)");
+                eprintln!("(error)  PTY: UpdateProcThreadAttribute(PSEUDOCONSOLE)");
                 return None;
             }
 
@@ -1848,7 +1860,7 @@ impl PTY {
                 &mut pi,
             ).is_err() {
 				let err = GetLastError().0;
-				eprintln!("ERROR: CreateProcessW() failed with code {}", err);
+				eprintln!("(error)  PTY: CreateProcessW() failed with code {}", err);
                 return None;
             }
 
@@ -1869,7 +1881,7 @@ impl PTY {
 			Y: r as i16,
 		};
 		let hr = unsafe{ResizePseudoConsole(self.hpc, size)};
-		if hr.is_err() {eprintln!("ERROR: ResizePseudoConsole");}
+		if hr.is_err() {eprintln!("(error)  PTY: ResizePseudoConsole");}
 		hr.is_ok()
 	}
 
@@ -1914,7 +1926,7 @@ impl PTY {
 			let mut code = 0u32;
             if GetExitCodeProcess(self.pi.hProcess, &mut code).is_ok() {
                 if code != STILL_ACTIVE.0 as u32 {
-					eprintln!("EXIT: child process exited");
+					eprintln!("(info)  PTY: child process exited");
 					
 					// clean exit (code previously in Drop)
 					unsafe {
@@ -1931,7 +1943,7 @@ impl PTY {
 						}
 					}
 					
-					std::process::exit(1);
+					std::process::exit(0);
 					//return 255; // unused by utf8, here means exit
 				} 
             }
@@ -1962,7 +1974,7 @@ impl PTY {
                 Some(&mut read), // number of bytes read
                 None,
 				).is_ok() && read == 1 {
-					eprintln!("TERMINAL: '{}' {}", buf[0] as char, buf[0]);
+					eprintln!("(info)  PTY: read '{}' {}", if ((32..128).contains(&buf[0])) {format!("{}", buf[0] as char)} else {format!("\\x{:02x}", buf[0])}, buf[0]);
 					return buf[0]; // there were bytes to read
             }
 			
@@ -2017,24 +2029,18 @@ fn main() {
     let pty = match PTY::new(options.shell, options.shell_args, options.term) {
         Some(pty) => pty,
         None => {
-            eprintln!("Failed to create PTY");
             return;
         }
     };
 
     unsafe { CURRENT_PTY = Some(pty); }
 
-    unsafe{CURRENT_PTY.as_mut().unwrap()}.set_size(40,190);
+	// TODO: set correct size on startup
+    unsafe{CURRENT_PTY.as_mut().unwrap()}.set_size(30,100);
 
 
     // init termin processor
-    let mut buff = match BUFF::new() {
-        Some(buff) => buff,
-        None => {
-            eprintln!("Failed to create BUFF");
-            return;
-        }
-    };
+    let mut buff = BUFF::new();
 
 
     // init UI

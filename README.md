@@ -28,7 +28,7 @@
  - [x] shell history menu: view history
  - [ ] shell history menu: edit history; save command from history <!-- (history <=> saved interoperability) -->
  - [ ] debug menu: view/modify raw data with escape sequences (input/output); cursor position <!-- (stdout/stderr/stdin - not visible for terminal emulator - only visible for shell) -->
- - [ ] good performance <!-- blocking PTY read (less cpu usage, but need to implement ui handling loop) + read/write in chunks (much faster) --> <!-- set new style by calling set_cursor (without getting/setting cursor position) --> <!-- util function to escape characters for js/html usage (efficiently) --> <!-- avoid specifiing lifetimes for BUFF -->
+ - [ ] good performance <!-- rewrite parser to use double vec (of lines of chunks) - should allow for faster cursor movements --> <!-- blocking PTY read (less cpu usage, but need to implement ui handling loop) + read/write in chunks (much faster) --> <!-- set new style by calling set_cursor (without getting/setting cursor position) --> <!-- avoid specifiing lifetimes for BUFF -->
  - [ ] bug-free parser <!-- parser bugs: nano newlines, gotop graph offset up -->
 
 
