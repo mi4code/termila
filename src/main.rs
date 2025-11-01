@@ -1,11 +1,13 @@
 use HUI::*;
-use std::{thread, time::Duration};
+use std::thread;
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::io::BufRead;
 use std::cmp::min;
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::RawFd;
@@ -125,14 +127,27 @@ impl OPTIONS {
 
 struct UI {
 	webview: HUI::WebView,
+	next_update: std::time::Instant,
+	tab: Arc<Mutex<TAB<'static>>>, // TODO: avoid static lifetime
+	options: OPTIONS,
 }
 impl UI {
 	
-	fn new() -> Self {
+	fn new(options: OPTIONS) -> Self {
 		
+		// UI webview window
 		let webview = HUI::WebView::new();
 		//webview.hui_tweaks();
-
+		
+		// initialize terminal tab (we need more references for callbacks) - only one since there is no support for multiple yet
+		let mut tab = TAB::new(&options).unwrap();
+		let mut tab = Arc::new(Mutex::new(tab));
+		let tab_cb1 = tab.clone(); // tab for keypress
+		let tab_cb2 = tab.clone(); // tab for size changes
+		
+		// set up initial value for UI update sheduler
+		let next_update = Instant::now();
+		
 
         // setup UI
         webview.load_str(r#"<!DOCTYPE html>
@@ -335,14 +350,14 @@ impl UI {
 				
             </body>
         </html>"#);
-        //webview.html_element("body p", "", ""); // HUI bug
+        //webview.html_element("body p", "", ""); // TODO: HUI bug
 
 
         // add keypress callback
         let key_term_handle = webview.call_native( move |args| {
                 if let Some(arg) = args.get(0) {
                     if let Ok(val) = arg.parse::<u8>() {
-						unsafe{CURRENT_PTY.as_mut().unwrap()}.write(val);
+						tab_cb1.lock().unwrap().pty.write(val);
                     }
                 }
             }, None );
@@ -380,7 +395,7 @@ impl UI {
                         if let Ok(c) = cols.parse::<u16>() {
                             if let Ok(r) = rows.parse::<u16>() {
                                 eprintln!("(info)  UI: resize {}x{}", c, r);
-                                unsafe{CURRENT_PTY.as_mut().unwrap()}.set_size(r,c);
+                                tab_cb2.lock().unwrap().pty.set_size(r,c);
                             }
                         }
                     }
@@ -390,7 +405,7 @@ impl UI {
         ), Some(false));
 		
 		
-		let self_ = Self { webview };
+		let self_ = Self { webview, next_update, tab, options };
 		
 		
 		// popups
@@ -456,7 +471,7 @@ impl UI {
 	
 	fn popup_saved (&self) {
 		let body = (||{
-			let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.saved_commands_file.clone()) {
+			let mut file = match File::open(self.options.saved_commands_file.clone()) {
 				Ok(f) => f,
 				Err(_) => return "<p>SAVED COMMANDS FILE NOT FOUND!</p>".to_string(),
 			};
@@ -480,7 +495,7 @@ impl UI {
 		
 	fn popup_history (&self) {
 		let body = (||{
-			let mut file = match File::open(unsafe{CURRENT_OPTIONS.as_mut().unwrap()}.history_file.clone()) { // TODO: auto-reload on each open
+			let mut file = match File::open(self.options.history_file.clone()) { // TODO: auto-reload on each open
 				Ok(f) => f,
 				Err(_) => return "<p>HISTORY FILE NOT FOUND!</p>".to_string(),
 			};
@@ -548,7 +563,8 @@ impl UI {
 	}
 
 	
-	fn debug_pty_read(&mut self) -> char {
+	// TODO: rework debug
+	/* fn debug_pty_read(&mut self) -> char {
 		
 		self.webview.call_js("document.querySelector('div#dbg').style.display='';", Some(false));
 		
@@ -556,7 +572,7 @@ impl UI {
 			self.webview.call_js("document.querySelector('#dbg #read').checked=false;", Some(false));
 		
 			// TODO: support unicode
-			let mut buf = unsafe{CURRENT_PTY.as_mut().unwrap()}.read();
+			let mut buf = self.tab.lock().unwrap().pty.read();
 			let mut uni: u8 = 9;
 			if buf & 0b1000_0000 == 0 {
 				uni = 0;
@@ -575,7 +591,7 @@ impl UI {
 				buf=35;
 			}
 			while uni != 0 {
-				buf = unsafe{CURRENT_PTY.as_mut().unwrap()}.read();
+				buf = self.tab.lock().unwrap().pty.read();
 				if buf != 0 {
 					uni-=1;
 				}
@@ -627,9 +643,157 @@ impl UI {
 		}
 	
 	
-	} 
+	} */
 	
 	
+	fn handle (&mut self) {
+		
+		self.tab.lock().unwrap().process(& self.webview, true);
+		
+		if Instant::now() >= self.next_update {
+			
+			// store debug data
+			#[cfg(debug_assertions)]
+			let delay = self.next_update.elapsed();
+			#[cfg(debug_assertions)]
+			let start = Instant::now();
+			
+			// plan next update
+			self.next_update = Instant::now() + Duration::from_millis(3);
+			
+			// update ui
+			WebView::handle_once();
+			
+			// print debug data
+			#[cfg(debug_assertions)]
+			if delay > Duration::from_millis(3) {
+				eprintln!("(warning)  UI: update delay {:?}", delay);
+			}
+			#[cfg(debug_assertions)]
+			if start.elapsed() > Duration::from_millis(3) {
+				eprintln!("(warning)  UI: update duration {:?}", start.elapsed());
+			}
+        }
+		
+	}
+	
+}
+
+
+struct TAB<'a> {
+	buff: BUFF<'a>,
+	pty: PTY,
+	fps: u8,
+	next_update: std::time::Instant,
+}
+impl TAB<'_> {
+	
+	fn new(options: &OPTIONS) -> Option<Self> {
+		
+		// init parsser
+		let mut buff = BUFF::new();
+		
+		// setup terminal
+		let mut pty = match PTY::new(options.shell.clone(), options.shell_args.clone(), options.term.clone()) {
+			Some(pty) => pty,
+			None => {
+				return None;
+			}
+		};
+		pty.set_size(30,100); // TODO: set correct size on startup
+		
+		// set fps
+		let fps: u8 = 5;
+		
+		// set initial next update
+		let next_update = Instant::now();
+		
+		Some(Self{buff, pty, fps, next_update })
+	}
+	
+	fn process (&mut self, webview: &HUI::WebView/*ui: & UI*/, update_ui: bool) {
+		
+		if Instant::now() >= self.next_update {
+			
+			// store debug data
+			#[cfg(debug_assertions)]
+			let delay = self.next_update.elapsed();
+			#[cfg(debug_assertions)]
+			let start = Instant::now();
+			
+			// plan next update
+			self.next_update = Instant::now() + Duration::from_millis((1000u64 / self.fps as u64));
+			
+			// do work
+			let mut counter = 0;
+			while true {
+				// performance note (release build): 'buff_write' has no performance impact when idle but under stress takes much more time than 'read_char' (which seems to have constant impact not depending on load) and sometimes 'ui_update' (which is most time consuming task, but can be tuned with fps setting) 
+				
+				// get data
+				let chr = self.read_char();
+			
+				// update size first
+				let (trows,tcolumns) = self.pty.get_size();
+				(self.buff.size_rows, self.buff.size_columns) = (trows as usize, tcolumns as usize);
+			
+				// process data
+				self.buff.write_raw(chr);
+				counter+=1;
+				
+				// stop when done or exceeded limit
+				if chr == '\0' {break;}
+				if counter >= 10240 { eprintln!("(warning)  TAB: processing read counter exceeded"); break; }
+			}
+			
+			// update UI
+			if update_ui {
+				//self.buff.update_full(& webview);
+				self.buff.update_partial(& webview);
+			}
+			
+			// print debug data
+			#[cfg(debug_assertions)]
+			if delay > Duration::from_millis((1000u64 / self.fps as u64)) {
+				eprintln!("(warning)  TAB: update delay {:?}", delay);
+			}
+			#[cfg(debug_assertions)]
+			if start.elapsed() > Duration::from_millis((1000u64 / self.fps as u64)) {
+				eprintln!("(warning)  TAB: update duration {:?}", start.elapsed());
+			}
+			//eprintln!("(benchmark)  TAB: time_read {:?}, time_buff {:?}, time_js {:?}", self.time_read, self.time_buff, self.time_js);
+			
+        }
+		
+	}
+	
+	fn read_char(&mut self) -> char {
+
+		// read the first byte
+		let mut buf = Vec::new();
+		buf.push(self.pty.read());
+
+		// determine how many bytes we need
+		let needed = match buf[0] {
+			0x00..=0x7F => 1,  // ASCII
+			0xC0..=0xDF => 2,  // 2-byte sequence
+			0xE0..=0xEF => 3,  // 3-byte sequence
+			0xF0..=0xF7 => 4,  // 4-byte sequence
+			_ => 0,            // invalid leading byte
+		};
+
+		// read more bytes if needed
+		while buf.len() < needed {
+			buf.push(self.pty.read());
+		}
+
+		// try to decode
+		match str::from_utf8(&buf) {
+			Ok(s) => s.chars().next().unwrap_or(' '),
+			Err(_) => ' ',
+		}
+		
+	}
+
 }
 
 
@@ -649,6 +813,9 @@ struct BUFF<'a> {
     
 	cursor_position_index: usize,
     cursor_position_character: usize,
+	
+	size_rows: usize,
+    size_columns: usize,
 }
 impl BUFF<'_> {
 	
@@ -662,6 +829,8 @@ impl BUFF<'_> {
                 current_escape_max_length: 0,
                 cursor_position_index: 0,
                 cursor_position_character: 0,
+				size_rows: usize::MAX,
+				size_columns: usize::MAX,
             }
         }
     }
@@ -1107,7 +1276,7 @@ impl BUFF<'_> {
 							self.set_cursor_cr(1,r);
 							
 							// write spaces
-							for _ in 0..unsafe{CURRENT_PTY.as_ref().unwrap()}.columns { self.write_buff(' '); }
+							for _ in 0..self.size_columns{ self.write_buff(' '); }
 							
 						}
 						else if final_escape == "1K" { // from beginning to cursor
@@ -1122,7 +1291,7 @@ impl BUFF<'_> {
 						else if final_escape == "0K" || final_escape == "K" { // from cursor to end of line
 							
 							// write spaces
-							for _ in 0..(unsafe{CURRENT_PTY.as_ref().unwrap()}.columns+1).saturating_sub(c) { self.write_buff(' '); }
+							for _ in 0..(self.size_columns+1).saturating_sub(c) { self.write_buff(' '); }
 							
 						}
 						
@@ -1156,14 +1325,14 @@ impl BUFF<'_> {
 						if self.current_escape.contains(";") {
 							let r = self.current_escape[2..self.current_escape.find(';').unwrap()].parse::<usize>().unwrap_or(1);
 							let c = self.current_escape[self.current_escape.find(';').unwrap()+1..self.current_escape.len()-1].parse::<usize>().unwrap_or(1);
-							self.set_cursor_cr(c,unsafe{CURRENT_PTY.as_ref().unwrap()}.rows.saturating_sub(r)+1);
+							self.set_cursor_cr(c,self.size_rows.saturating_sub(r)+1);
 						}
 						
 						// column ommited so default
 						else {
 							let r = self.current_escape[2..self.current_escape.find('H').unwrap()].parse::<usize>().unwrap_or(1);
 							let c = 1;
-							self.set_cursor_cr(c,unsafe{CURRENT_PTY.as_ref().unwrap()}.rows.saturating_sub(r)+1);
+							self.set_cursor_cr(c,self.size_rows.saturating_sub(r)+1);
 						}
 						
 					}
@@ -1389,8 +1558,8 @@ impl BUFF<'_> {
 
 		// limit values to terminal size
 		if column == 0 {column=1;}
-        if column >= unsafe{CURRENT_PTY.as_ref().unwrap()}.columns {column=unsafe{CURRENT_PTY.as_ref().unwrap()}.columns;}
-        if row >= unsafe{CURRENT_PTY.as_ref().unwrap()}.rows {row=unsafe{CURRENT_PTY.as_ref().unwrap()}.rows;}
+        if column >= self.size_columns {column=self.size_columns;}
+        if row >= self.size_rows {row=self.size_rows;}
 		
 
 		// add rows in case there are less of them than the requested move
@@ -1402,12 +1571,12 @@ impl BUFF<'_> {
         while iter {
 			if self.formated_text.get(index).unwrap().text.get(character..character+1).unwrap_or("\0") == "\n" {existing_rows+=1;}
             iter = self.iter_next(& mut index,& mut character);
-			if existing_rows > unsafe{CURRENT_PTY.as_ref().unwrap()}.rows {break;}
+			if existing_rows > self.size_rows {break;}
         }
 		// add newlines if needed
 		if existing_rows < row+1 {
 			self.set_cursor( self.formated_text.len()-1, self.formated_text.get(self.formated_text.len()-1).unwrap().text.len() ); // since we are in set_cursor we can move the cursor freely
-			for _ in 0..(unsafe{CURRENT_PTY.as_ref().unwrap()}.rows-existing_rows) { self.write_buff('\n'); }
+			for _ in 0..(self.size_rows-existing_rows) { self.write_buff('\n'); }
 		}
 		
 		
@@ -1696,6 +1865,10 @@ impl PTY {
             return true;
         }
     }
+	
+	fn get_size(&self) -> (u16,u16) {
+		(self.rows as u16, self.columns as u16)
+	}
 
     fn write(&mut self, b: u8) -> bool {
         unsafe {
@@ -1884,6 +2057,10 @@ impl PTY {
 		if hr.is_err() {eprintln!("(error)  PTY: ResizePseudoConsole");}
 		hr.is_ok()
 	}
+	
+	fn get_size(&self) -> (u16,u16) {
+		(self.rows as u16, self.columns as u16)
+	}
 
     fn write(&mut self, b: u8) -> bool {
 		if b == 0x1B || b == b'[' {
@@ -1984,103 +2161,30 @@ impl PTY {
     }
 	
 }
+#[cfg(target_os = "windows")]
+unsafe impl Send for PTY {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for PTY {}
 
 
-fn read_char<F>(mut read: F) -> char  where F: FnMut() -> u8 {
-
-    // read the first byte
-	let mut buf = Vec::new();
-    buf.push(read());
-
-    // determine how many bytes we need
-    let needed = match buf[0] {
-        0x00..=0x7F => 1,  // ASCII
-        0xC0..=0xDF => 2,  // 2-byte sequence
-        0xE0..=0xEF => 3,  // 3-byte sequence
-        0xF0..=0xF7 => 4,  // 4-byte sequence
-        _ => 0,            // invalid leading byte
-    };
-
-    // read more bytes if needed
-    while buf.len() < needed {
-        buf.push(read());
-    }
-
-    // try to decode
-    match str::from_utf8(&buf) {
-        Ok(s) => s.chars().next().unwrap_or(' '),
-        Err(_) => ' ',
-    }
-	
-}
-
-
-// unsafe (because of threads)
-static mut CURRENT_PTY: Option<PTY> = None;
-static mut CURRENT_OPTIONS: Option<OPTIONS> = None;
 
 fn main() {
 	
 	// load options
 	let options = OPTIONS::new();
-	unsafe {CURRENT_OPTIONS = Some(OPTIONS::new());}
-
-    // setup terminal
-    let pty = match PTY::new(options.shell, options.shell_args, options.term) {
-        Some(pty) => pty,
-        None => {
-            return;
-        }
-    };
-
-    unsafe { CURRENT_PTY = Some(pty); }
-
-	// TODO: set correct size on startup
-    unsafe{CURRENT_PTY.as_mut().unwrap()}.set_size(30,100);
-
-
-    // init termin processor
-    let mut buff = BUFF::new();
-
 
     // init UI
-	let mut ui = UI::new();
-
-
-    // run main loop
-
-    let mut to_update = 0; // keep count of bytes that were outputed to the terminal but were not yet shown in the ui
-
-    loop {
-
-        //let buf = unsafe{CURRENT_PTY.as_mut().unwrap()}.read(); // make the terminal read
-		//let chr = buf as char;
+	let mut ui = UI::new(options);
+	
+	// run main loop
+	loop {
 		
-		//let chr = ui.debug_pty_read();
+		// handle UI
+		ui.handle();
 		
-		let chr = read_char(move||{unsafe{CURRENT_PTY.as_mut().unwrap()}.read()});
+		// save cpu time
+		thread::sleep(Duration::from_millis(1)); 
 		
-        buff.write_raw(chr);
-		
-
-        if to_update >= 1024 || (chr == '\0' && to_update != 0) { // if there are no new bytes comming show them, if there are more than 1024 bytes pending for being shown show them too
-            to_update = 0;
-
-            //buff.update_full(&mut ui.webview);
-			buff.update_partial(&mut ui.webview);
-        }
-
-        else if chr != '\0' {
-            to_update += 1; // count read bytes
-        }
-
-        else {
-            thread::sleep(Duration::from_millis(2)); // save cpu time
-        }
-
-        WebView::handle_once();
-
-    }
-
+	}
 
 }
