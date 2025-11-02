@@ -1677,63 +1677,66 @@ impl BUFF<'_> {
 		
 		
 		// perform update
-		for i in (0..self.formated_text.len()).rev() {
+		if self.formated_text_changes != 0 {
+			let mut js_call = "(function(){let e;".to_string(); // store all js commands and then run them all at once (reduces calling overhead)
 			
-			if self.formated_text_changes == 0 { break; }  // everything was already updated
-			
-			if self.formated_text.get(i).unwrap().updated {
+			for i in (0..self.formated_text.len()).rev() {
 				
-				if self.formated_text.get(i).unwrap().id == 0 { // add element
-					self.formated_text_last_id += 1;
-					self.formated_text.get_mut(i).unwrap().id = self.formated_text_last_id;
-					
-					webview.call_js( 
-						&format!(
-							"(function(){{ let e = document.createElement('span'); e.id = 't-{}'; e.innerHTML=`{}`; e.style.cssText = `{}`; {} }})()",
-							self.formated_text.get(i).unwrap().id,
-							UI::escape_text(&self.formated_text.get(i).unwrap().text),
-							self.formated_text.get(i).unwrap().style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" "),
-							if self.formated_text.get(i+1).unwrap_or(&BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:false,id:0}).id != 0 {format!("document.querySelector('body p#console span#t-{}').before(e);", self.formated_text.get(i+1).unwrap().id)} else {"document.querySelector('body p#console').appendChild(e);".to_string()}
-						), 
-						Some(false) 
-					);
-					
-					self.formated_text.get_mut(i).unwrap().updated = false;
-				}
+				if self.formated_text_changes == 0 { break; }  // everything was already updated
 				
-				else if self.formated_text.get(i).unwrap().text == "" && self.cursor_position_index != i { // delete element
-					// we need to avoid removing chunk at cursor position in order to preserve current color - thus just process it as edit (in case it previously contained something), this way we loose the chance to remove all possible empty chunks
+				if self.formated_text.get(i).unwrap().updated {
 					
-					webview.call_js( 
-						&format!(
-							"(function(){{ document.querySelector('body p#console span#t-{}').remove(); }})()",
-							self.formated_text.get(i).unwrap().id,
-						), 
-						Some(false) 
-					);
-					if self.cursor_position_index > i {
-						self.cursor_position_index -= 1;
+					if self.formated_text.get(i).unwrap().id == 0 { // add element
+						self.formated_text_last_id += 1;
+						self.formated_text.get_mut(i).unwrap().id = self.formated_text_last_id;
+						
+						js_call.push_str(
+							&format!(
+								"e = document.createElement('span'); e.id = 't-{}'; e.innerHTML=`{}`; e.style.cssText = `{}`; {}",
+								self.formated_text.get(i).unwrap().id,
+								UI::escape_text(&self.formated_text.get(i).unwrap().text),
+								self.formated_text.get(i).unwrap().style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" "),
+								if self.formated_text.get(i+1).unwrap_or(&BUFF_formated_text{text:"".to_string(),style:[].iter().cloned().collect(),updated:false,id:0}).id != 0 {format!("document.querySelector('body p#console span#t-{}').before(e);", self.formated_text.get(i+1).unwrap().id)} else {"document.querySelector('body p#console').appendChild(e);".to_string()}
+							)
+						);
+						
+						self.formated_text.get_mut(i).unwrap().updated = false;
 					}
-					self.formated_text.remove(i); // should be safe to do since we iterate from the end
-				}
-				
-				else { // edit element
-					webview.call_js( 
-						&format!(
-							"(function(){{ let e = document.querySelector('body p#console span#t-{}'); e.innerHTML=`{}`; e.style.cssText = `{}`; }})()",
-							self.formated_text.get(i).unwrap().id,
-							UI::escape_text(&self.formated_text.get(i).unwrap().text),
-							self.formated_text.get(i).unwrap().style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" ")
-						), 
-						Some(false) 
-					);
 					
-					self.formated_text.get_mut(i).unwrap().updated = false;
+					else if self.formated_text.get(i).unwrap().text == "" && self.cursor_position_index != i { // delete element
+						// we need to avoid removing chunk at cursor position in order to preserve current color - thus just process it as edit (in case it previously contained something), this way we loose the chance to remove all possible empty chunks
+						
+						js_call.push_str(
+							&format!(
+								"document.querySelector('body p#console span#t-{}').remove();",
+								self.formated_text.get(i).unwrap().id,
+							)
+						);
+						if self.cursor_position_index > i {
+							self.cursor_position_index -= 1;
+						}
+						self.formated_text.remove(i); // should be safe to do since we iterate from the end
+					}
+					
+					else { // edit element
+						js_call.push_str(
+							&format!(
+								"e = document.querySelector('body p#console span#t-{}'); e.innerHTML=`{}`; e.style.cssText = `{}`;",
+								self.formated_text.get(i).unwrap().id,
+								UI::escape_text(&self.formated_text.get(i).unwrap().text),
+								self.formated_text.get(i).unwrap().style.iter().map(|(key, value)|format!("{}: {};", key, value)).collect::<Vec<String>>().join(" ")
+							) 
+						);
+						
+						self.formated_text.get_mut(i).unwrap().updated = false;
+					}
+					
+					self.formated_text_changes-=1;
 				}
 				
-				self.formated_text_changes-=1;
 			}
-			
+			js_call.push_str("})()");
+			webview.call_js(&js_call, Some(false));
 		}
 		
 		if self.formated_text_changes > 0 { 
